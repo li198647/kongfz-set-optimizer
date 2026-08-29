@@ -1,0 +1,11 @@
+# 回滚备份（磁盘安全网，由 git tag 接管版本基线）
+*.bak
+
+# 调试日志（浏览器抓包/接口日志，不进版本控制）
+*.log
+
+# WorkBuddy 内部目录
+.workbuddy/
+
+# 剪贴板截图
+clipboard-images/
