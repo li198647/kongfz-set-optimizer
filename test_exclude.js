@@ -47,6 +47,37 @@ function listExcluded() {
   for (const k of Object.keys(m)) { const r = m[k]; if (!r || r.alias) continue; out.push(r); }
   return out;
 }
+// 与 user.js 同步：归一化 + 两个批量释放函数
+function normText(s) {
+  return String(s || '').replace(/\s+/g, '').replace(/[^\u4e00-\u9fff\u3400-\u4dbf0-9A-Za-z]/g, '');
+}
+function releaseRelatedExcluded(book) {
+  const nb = normText(book || '');
+  if (nb.length < 2) return 0;
+  const list = listExcluded();
+  let n = 0;
+  for (const e of list) { if (normText(e.title).indexOf(nb) >= 0) { removeExcluded(e.key); n++; } }
+  return n;
+}
+function clearAllExcluded() {
+  const list = listExcluded();
+  for (const e of list) removeExcluded(e.key);
+  return list.length;
+}
+// exrules 存取（供 releaseRelated 联动测试）
+const EXRULE_KEY = 'kfz_exrules';
+function loadExRules(bookName) {
+  const all = GM_getValue(EXRULE_KEY, {}) || {};
+  const r = all[String(bookName || '')];
+  return Array.isArray(r) ? r : [];
+}
+function saveExRules(bookName, rules) {
+  const all = GM_getValue(EXRULE_KEY, {}) || {};
+  const k = String(bookName || '');
+  const clean = (rules || []).map((s) => String(s || '').trim()).filter(Boolean);
+  if (clean.length) all[k] = clean; else delete all[k];
+  GM_setValue(EXRULE_KEY, all);
+}
 
 let pass = 0, fail = 0;
 const T = (name, got, exp) => {
@@ -103,6 +134,27 @@ const onlyLink = { itemId: null, title: '仅链接', shopName: 'Z店', price: 9,
 T('仅链接条目可加入', addExcluded(onlyLink), true);
 T('仅链接条目可命中', isExcluded({ itemId: 123, link: 'https://book.kongfz.com/3/4' }), true);
 T('无 itemId 无 link 返回 false', addExcluded({}), false);
+
+// ★ v1.2.1：批量释放函数（releaseRelatedExcluded / clearAllExcluded）
+STORE = {};  // 重置，专测批量释放
+addExcluded({ itemId: 1, title: '汉声数学 第5册', shopName: 'A店', price: 10, link: 'https://x/1' });
+addExcluded({ itemId: 2, title: '汉声数学图画书 第8册', shopName: 'B店', price: 12, link: 'https://x/2' });
+addExcluded({ itemId: 3, title: '明朝那些事儿 第2册', shopName: 'C店', price: 9, link: 'https://x/3' });  // 不相关
+T('批量释放前共 3 条', listExcluded().length, 3);
+T('书名过短(<2)不释放', releaseRelatedExcluded('数'), 0);
+T('释放相关书名“汉声数学”命中 2 条', releaseRelatedExcluded('汉声数学'), 2);
+T('释放后列表剩 1 条(不相关保留)', listExcluded().length, 1);
+T('不相关条目仍在', listExcluded()[0].title, '明朝那些事儿 第2册');
+T('清空全部返回 1', clearAllExcluded(), 1);
+T('清空后列表为空', listExcluded().length, 0);
+// releaseRelated 联动清空当前书名 exrules（模拟按钮：释放相关手动排除 + 清该书规则）
+saveExRules('汉声数学', ['1-7大结局', '全套包邮']);
+T('规则已写入', loadExRules('汉声数学').length, 2);
+addExcluded({ itemId: 4, title: '汉声数学 第1册', shopName: 'D店', price: 8, link: 'https://x/4' });
+const relN = releaseRelatedExcluded('汉声数学');
+saveExRules('汉声数学', []);
+T('联动：相关手动排除释放 1 条', relN, 1);
+T('联动：当前书名 exrules 已清空', loadExRules('汉声数学').length, 0);
 
 console.log('\n通过 ' + pass + ' / 共 ' + (pass + fail) + ' 项' + (fail ? ('，失败 ' + fail + ' 项') : '，全部通过 ✅'));
 process.exit(fail ? 1 : 0);
