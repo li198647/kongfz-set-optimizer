@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.2.6
+// @version     1.2.7
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '' };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.2.6';
+  const SCRIPT_VERSION = '1.2.7';
 
   /* ============================================================
    * 工具函数
@@ -872,9 +872,17 @@
       for (const L of listings) { let m = L.volMask; while (m) { const v = Math.log2(m & -m); covered.add(Math.round(v)); m &= m - 1; } }
       const missing = [];
       for (let i = 0; i < n; i++) if (!covered.has(i)) missing.push(i);
-      // v1.2.6: 凑不齐整套时，找"已能凑齐的最大子集"里最低总价的 mask，回溯出最佳部分覆盖（仍展示给用户）
-      let bestMask = 0, bestCost = Infinity;
-      for (let m = 1; m < N1; m++) { if (dp[m] < bestCost) { bestCost = dp[m]; bestMask = m; } }
+      // v1.2.6: 凑不齐整套时，找"已凑到最多分册"且"该分册数下总价最低"的部分覆盖 mask 回溯展示。
+      // 教训：原先只用 dp[m]<bestCost 筛，会被"1店1册¥21"这种极小总价误导，丢掉 7 册的更优方案。
+      let bestMask = 0, bestCount = 0, bestCost = Infinity;
+      for (let m = 1; m < N1; m++) {
+        if (dp[m] === Infinity) continue;
+        // popcount：m 里置位的个数 = 此方案覆盖的卷数
+        let cnt = 0; { let t = m; while (t) { cnt++; t &= t - 1; } }
+        if (cnt > bestCount || (cnt === bestCount && dp[m] < bestCost)) {
+          bestCount = cnt; bestCost = dp[m]; bestMask = m;
+        }
+      }
       let partialPlan = null;
       if (bestMask !== 0 && bestCost < Infinity) {
         const pp = []; let pm = bestMask;
@@ -890,7 +898,8 @@
       }
       return {
         ok: false, error: '无法凑齐整套', missing,
-        partialPlan, partialMask: bestMask, partialTotal: bestCost < Infinity ? bestCost : null
+        partialPlan, partialMask: bestMask, partialTotal: bestCost < Infinity ? bestCost : null,
+        partialCount: bestCount
       };
     }
 
