@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.1.16
+// @version     1.1.17
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '' };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.1.16';
+  const SCRIPT_VERSION = '1.1.17';
 
   /* ============================================================
    * 工具函数
@@ -739,7 +739,9 @@
       shopIdx++;
       const nd = Float64Array.from(dp);
       const nparent = Int32Array.from(parent);
-      const nchoice = new Array(N1).fill(null);
+      // v1.1.17-FIX: nchoice 必须从上一轮 choice 继承！如果当前 shop 的 cfg 不能改进 FULL（FULL 已满，新 cost 一定更贵），
+      //   而直接 fill(null) 会丢掉上轮积累的 nchoice[FULL]，导致回溯从 FULL 一开始就断，plan.length=0 即"0 居店"。
+      const nchoice = Array.from(choice);
       const cfgArr = Array.from(sc.configs.entries());
       if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + '/' + shopConfigs.length + ' configs=' + cfgArr.length);
 
