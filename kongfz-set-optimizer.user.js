@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.1.17
+// @version     1.1.18
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '' };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.1.17';
+  const SCRIPT_VERSION = '1.1.18';
 
   /* ============================================================
    * 工具函数
@@ -635,37 +635,68 @@
       s.listings.push(L);
     }
 
-    // 2) 每个店铺内：双状态 DP（typed array + 双亲引用，去 Array.concat）
+    // 2) 每个店铺内：双状态 DP（局部 mask 降维 —— 维数 = 本店涉及册数，而非全局 n）
+    //    关键优化：原先每店都开 2^n 维(≈209万)的 8 个 typed array(≈64MB)，225 店→≈14GB 分配把 GC 拖垮，单店 6-10s。
+    //    降维后单店维数 = 2^(本店册数)，通常 2^3=8，内存从 64MB→几百字节，单店 <1ms，整体提速上万倍；运费逻辑不变(仍 af/nf 双状态，一店只收一次运费)。
     const N1 = 1 << n;
     const bigN = n >= 10;                          // 大 n 时启用 yield（避免小输入无谓让位）
     const shopConfigs = [];
     for (const s of shops.values()) {
+      // —— 局部索引：把本店涉及的全局卷位映射到 0..ln-1，实现降维 ——
+      const localVols = [];                          // localVols[li] = 全局卷索引 i（卷 i 对应 (1<<i)）
+      const gToL = new Int32Array(n).fill(-1);       // 全局卷索引 → 局部索引
+      for (const L of s.listings) {
+        let gm = L.volMask;
+        while (gm) {
+          const bit = gm & -gm;
+          const gi = 31 - Math.clz32(bit);           // 全局卷索引（无浮点误差）
+          if (gToL[gi] < 0) { gToL[gi] = localVols.length; localVols.push(gi); }
+          gm &= gm - 1;
+        }
+      }
+      const ln = localVols.length;
+      if (ln === 0) continue;
+      const LN1 = 1 << ln;
+
       let shopShip = 0, hasNonFree = false;
       for (const L of s.listings) {
         if (!L.free && L.shipping > 0) { hasNonFree = true; if (shopShip === 0 || L.shipping < shopShip) shopShip = L.shipping; }
       }
       if (!hasNonFree) shopShip = 0;
 
-      // typed array：成本 Float64 + 双亲引用 Int32（替代原 afP/nfP 的 concat 链）
-      const af = new Float64Array(N1);
-      const nf = new Float64Array(N1);
-      for (let k = 0; k < N1; k++) { af[k] = Infinity; nf[k] = Infinity; }
+      // 局部维 typed array（维数 LN1，通常极小：本店册数 3 → 2^3=8 状态）
+      const af = new Float64Array(LN1);
+      const nf = new Float64Array(LN1);
+      for (let k = 0; k < LN1; k++) { af[k] = Infinity; nf[k] = Infinity; }
       af[0] = 0;
 
-      const afPrev = new Int32Array(N1);
-      const afIdx  = new Int32Array(N1);
-      const nfPrev = new Int32Array(N1);
-      const nfIdx  = new Int32Array(N1);
-      const nfFromAf = new Uint8Array(N1);  // 1 = nf[mask] 来自 af[prev]+i+ship（prev 在 af 链上）；0 = 来自 nf[prev]+i
+      const afPrev = new Int32Array(LN1);
+      const afIdx  = new Int32Array(LN1);
+      const nfPrev = new Int32Array(LN1);
+      const nfIdx  = new Int32Array(LN1);
+      const nfFromAf = new Uint8Array(LN1);
       afPrev.fill(-1); afIdx.fill(-1); nfPrev.fill(-1); nfIdx.fill(-1);
 
       const items = s.listings;
+      // 预计算每个 listing 的局部 mask（把全局 volMask 投影到局部位）
+      const localMask = new Int32Array(items.length);
+      for (let i = 0; i < items.length; i++) {
+        let gm = items[i].volMask, lm = 0;
+        while (gm) {
+          const bit = gm & -gm;
+          const gi = 31 - Math.clz32(bit);
+          lm |= (1 << gToL[gi]);
+          gm &= gm - 1;
+        }
+        localMask[i] = lm;
+      }
+
       const shopStart = CONFIG.debug ? _t() : 0;
 
       for (let i = 0; i < items.length; i++) {
-        const it = items[i], lm = it.volMask, p = it.price;
-        if (it.free) {
-          for (let mask = N1 - 1; mask >= 0; mask--) {
+        const lm = localMask[i], p = items[i].price;
+        if (items[i].free) {
+          for (let mask = LN1 - 1; mask >= 0; mask--) {
             if (af[mask] !== Infinity) {
               const nm = mask | lm, c = af[mask] + p;
               if (c < af[nm]) { af[nm] = c; afPrev[nm] = mask; afIdx[nm] = i; }
@@ -676,7 +707,7 @@
             }
           }
         } else {
-          for (let mask = N1 - 1; mask >= 0; mask--) {
+          for (let mask = LN1 - 1; mask >= 0; mask--) {
             if (af[mask] !== Infinity) {
               const nm = mask | lm, c = af[mask] + p + shopShip;
               if (c < nf[nm]) { nf[nm] = c; nfPrev[nm] = mask; nfIdx[nm] = i; nfFromAf[nm] = 1; }
@@ -687,12 +718,10 @@
             }
           }
         }
-        // 单店 listings 循环让位：每 16 个 listing
         if (bigN && (i & 0xF) === 0xF) await yieldToBrowser();
       }
 
-      // 回溯 helper（按双亲引用链重建 picks 列表）
-      // 注意：每次循环要按当前 w（af/nf）重新查表，因为从 nf→af 跳转后要切到 afIdx。
+      // 回溯（局部空间，返回的 picks 是全局 listing 对象，正确）
       const backtrack = (which, mask) => {
         const out = [];
         let m = mask, w = which;
@@ -702,26 +731,32 @@
           const pm = Prev[m], idx = Idx[m];
           if (pm < 0 || idx < 0) break;
           out.push(items[idx]);
-          if (w === 'nf' && nfFromAf[m] === 1) w = 'af';   // 当前跳是 af→nf，pm 在 af 链上
+          if (w === 'nf' && nfFromAf[m] === 1) w = 'af';
           m = pm;
         }
         return out.reverse();
       };
 
+      // 局部 mask → 全局 mask（把本店覆盖的局部位还原成全局卷位）
+      const localToGlobal = (lm) => {
+        let gm = 0, m = lm, pos = 0;
+        while (m) { if (m & 1) gm |= (1 << localVols[pos]); m >>= 1; pos++; }
+        return gm;
+      };
+
       const configMap = new Map();
-      for (let mask = 1; mask < N1; mask++) {
-        if (af[mask] <= nf[mask]) {
-          if (af[mask] < Infinity) configMap.set(mask, { cost: af[mask], picks: backtrack('af', mask) });
-        } else {
-          if (nf[mask] < Infinity) configMap.set(mask, { cost: nf[mask], picks: backtrack('nf', mask) });
-        }
-        // 配置构建让位：每 65536 mask
-        if (bigN && (mask & 0xFFFF) === 0xFFFF) await yieldToBrowser();
+      for (let mask = 1; mask < LN1; mask++) {
+        let cost, which;
+        if (af[mask] <= nf[mask]) { if (af[mask] < Infinity) { cost = af[mask]; which = 'af'; } else continue; }
+        else { if (nf[mask] < Infinity) { cost = nf[mask]; which = 'nf'; } else continue; }
+        configMap.set(localToGlobal(mask), { cost, picks: backtrack(which, mask) });
+        // LN1 通常极小，无需让位；仅超大规模单店（LN1>65536）才 yield
+        if (bigN && LN1 > 65536 && (mask & 0xFFFF) === 0xFFFF) await yieldToBrowser();
       }
 
       if (CONFIG.debug) {
         console.log('[kfz] opt shop="' + (s.shopName || '').slice(0, 12) + '" items=' + items.length +
-          ' configs=' + configMap.size + ' dt=' + (_t() - shopStart).toFixed(0) + 'ms');
+          ' localN=' + ln + ' configs=' + configMap.size + ' dt=' + (_t() - shopStart).toFixed(0) + 'ms');
       }
       shopConfigs.push({ shop: s, configs: configMap, shopShip });
     }
@@ -735,39 +770,54 @@
     const choice = new Array(N1).fill(null);
 
     let shopIdx = 0;
+    const inChg = new Uint8Array(N1);   // 复用标记，记录本店被更新的 mask
     for (const sc of shopConfigs) {
       shopIdx++;
       const nd = Float64Array.from(dp);
       const nparent = Int32Array.from(parent);
-      // v1.1.17-FIX: nchoice 必须从上一轮 choice 继承！如果当前 shop 的 cfg 不能改进 FULL（FULL 已满，新 cost 一定更贵），
-      //   而直接 fill(null) 会丢掉上轮积累的 nchoice[FULL]，导致回溯从 FULL 一开始就断，plan.length=0 即"0 居店"。
+      // v1.1.17-FIX: nchoice 必须从上一轮 choice 继承！直接 fill(null) 会丢 nchoice[FULL] → 回溯 0 居店。
       const nchoice = Array.from(choice);
-      const cfgArr = Array.from(sc.configs.entries());
+      // 预计算每个配置的全局 mask 与 base 价（去掉内层上亿次 reduce 调用）
+      const cfgArr = [];
+      for (const [sm, cfg] of sc.configs.entries()) {
+        let base = 0;
+        for (const p of cfg.picks) base += p.price;
+        cfgArr.push({ sm, cost: cfg.cost, picks: cfg.picks, base });
+      }
       if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + '/' + shopConfigs.length + ' configs=' + cfgArr.length);
 
+      inChg.fill(0);
+      const changed = [];
       let updates = 0;
+      let lastYield = _t();
+      let chk = 0;
+      // 密集顺序遍历全部 2^n 状态：V8 对定长顺序循环优化极好，比显式 active 列表（破坏缓存局部性）更快
       for (let mask = 0; mask < N1; mask++) {
         const dpM = dp[mask];
         if (dpM === Infinity) continue;
         for (let k = 0; k < cfgArr.length; k++) {
-          const sm = cfgArr[k][0], cfg = cfgArr[k][1];
-          const nmask = mask | sm;
-          const cand = dpM + cfg.cost;
+          const e = cfgArr[k];
+          const nmask = mask | e.sm;
+          const cand = dpM + e.cost;
           if (cand < nd[nmask]) {
             nd[nmask] = cand;
             nparent[nmask] = mask;
-            const ship = cfg.cost - cfg.picks.reduce((a, b) => a + b.price, 0);
-            nchoice[nmask] = { shop: sc.shop, picks: cfg.picks, ship };
+            nchoice[nmask] = { shop: sc.shop, picks: e.picks, ship: e.cost - e.base };
             updates++;
+            if (!inChg[nmask]) { inChg[nmask] = 1; changed.push(nmask); }
           }
         }
-        // 全局 DP 主循环让位（每 65536 mask 一次，约 32 次/店 n=21）
-        if (bigN && (mask & 0xFFFF) === 0xFFFF) {
+        // 全局 DP 让位：每 262144 次迭代才检查一次时间（避免热循环每次调 _t() 拖垮性能），>50ms 才 yield 保不冻屏
+        if (bigN && (++chk & 0x3FFFF) === 0 && _t() - lastYield > 50) {
+          lastYield = _t();
           if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + ' mask=' + mask + '/' + N1 + ' updates=' + updates);
           await yieldToBrowser();
         }
       }
-      for (let m = 0; m < N1; m++) { dp[m] = nd[m]; parent[m] = nparent[m]; choice[m] = nchoice[m]; }
+      // 只提交被本店改变的 mask（避免每店全量 2^n 写回）
+      for (let i = 0; i < changed.length; i++) { const m = changed[i]; dp[m] = nd[m]; parent[m] = nparent[m]; choice[m] = nchoice[m]; }
+      if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + ' DONE changed=' + changed.length + ' updates=' + updates);
+      if (bigN) await yieldToBrowser();
     }
 
     if (CONFIG.debug) {
