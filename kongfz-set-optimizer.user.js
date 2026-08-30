@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.2.5
+// @version     1.2.6
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '' };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.2.5';
+  const SCRIPT_VERSION = '1.2.6';
 
   /* ============================================================
    * 工具函数
@@ -872,7 +872,26 @@
       for (const L of listings) { let m = L.volMask; while (m) { const v = Math.log2(m & -m); covered.add(Math.round(v)); m &= m - 1; } }
       const missing = [];
       for (let i = 0; i < n; i++) if (!covered.has(i)) missing.push(i);
-      return { ok: false, error: '无法凑齐整套', missing };
+      // v1.2.6: 凑不齐整套时，找"已能凑齐的最大子集"里最低总价的 mask，回溯出最佳部分覆盖（仍展示给用户）
+      let bestMask = 0, bestCost = Infinity;
+      for (let m = 1; m < N1; m++) { if (dp[m] < bestCost) { bestCost = dp[m]; bestMask = m; } }
+      let partialPlan = null;
+      if (bestMask !== 0 && bestCost < Infinity) {
+        const pp = []; let pm = bestMask;
+        while (pm !== 0) {
+          const c = choice[pm];
+          if (!c) break;
+          const subtotal = c.picks.reduce((a, b) => a + b.price, 0) + (c.ship || 0);
+          pp.push({ shop: c.shop, listings: c.picks, shipping: c.ship || 0, subtotal });
+          pm = parent[pm];
+        }
+        pp.reverse();
+        partialPlan = pp;
+      }
+      return {
+        ok: false, error: '无法凑齐整套', missing,
+        partialPlan, partialMask: bestMask, partialTotal: bestCost < Infinity ? bestCost : null
+      };
     }
 
     // 4) 回溯方案
@@ -987,6 +1006,13 @@
       /* 凑不齐时的错误提示条 */
       #kfz-result .kfz-err{margin:8px 12px 4px;padding:6px 8px;background:#fdecec;border:1px solid #f3d3d4;
         border-radius:6px;color:#c8161d;font-size:12px;font-weight:700}
+      /* v1.2.6: 凑不齐时，"缺少分册"用更醒目的红底白字大号 banner */
+      #kfz-result .kfz-missing-banner{margin:8px 12px 4px;padding:8px 10px;background:#c8161d;border:2px solid #a91016;
+        border-radius:6px;color:#fff;font-size:14px;font-weight:700;line-height:1.6}
+      #kfz-result .kfz-missing-banner b{color:#ffe96b;font-weight:700}
+      /* v1.2.6: 凑不齐但已找到部分覆盖时，"已凑到 X/Y 册"绿底提示 */
+      #kfz-result .kfz-partial-head{margin:8px 12px 4px;padding:6px 8px;background:#ecf7ec;border:1px solid #c9e2c9;
+        border-radius:6px;color:#2a7a2a;font-size:14px;font-weight:700}
     `);
 
     const panel = ce('div', { id: 'kfz-panel' });
@@ -1197,6 +1223,63 @@
 
   async function runWith(data, logf, result, isDemo, condStrIn) {
     const { volumes, listings } = data;
+    // v1.2.6: 抽 renderPlanSection，成功与“凑不齐有部分覆盖”两种场景共用方案表格渲染
+    function renderPlanSection(plan, total, volumes, effective, isPartial, isDemo) {
+      const naive = naivePlan(volumes, effective);
+      const saved = naive - total;
+      // ★ v1.1.7：统计“重复购买”的册（算法用 OR 合并 volMask，允许重叠覆盖——多买也可以，只要总价最便宜）
+      const volCount = new Map();
+      plan.forEach((p) => {
+        p.listings.forEach((L) => {
+          let m = L.volMask;
+          while (m) { const low = m & -m; const idx = Math.round(Math.log2(low)); volCount.set(idx, (volCount.get(idx) || 0) + 1); m &= m - 1; }
+        });
+      });
+      const dupIdx = [...volCount.entries()].filter(([, c]) => c > 1).map(([i]) => i).sort((a, b) => a - b);
+      const n = volumes.length;
+      let coveredCount = n;
+      if (isPartial) {
+        const partialMask = plan.reduce((a, p) => a | p.listings.reduce((b, L) => b | L.volMask, 0), 0);
+        coveredCount = 0; { let mm = partialMask; while (mm) { coveredCount++; mm &= mm - 1; } }
+      }
+      let html = '';
+      if (isPartial) {
+        html += '<div class="kfz-partial-head">✅ 已凑到 <b>' + coveredCount + '/' + n + ' 册</b>：最低 ' + yuan(total) + '（共 ' + plan.length + ' 家店）</div>';
+      } else {
+        html += '<div class="total">💰 最低总价：' + yuan(total) + '（共 ' + plan.length + ' 家店）</div>';
+      }
+      if (dupIdx.length) {
+        const names = dupIdx.map((i) => (volumes[i] ? volumes[i].name : '第' + (i + 1) + '册')).join('、');
+        html += '<div class="kfz-tip kfz-dup">📦 本方案<b>重复购买</b>了 ' + names +
+          '（多家店都含这几册）。多买也算，只要总价最便宜——不想重复可用「🚫排除」去掉某家店。</div>';
+      }
+      html += '<div class="kfz-tip">对比：各册分别买最便宜的（含各自运费）约 ' + yuan(naive) +
+        '，本方案可省 ' + yuan(Math.max(0, saved)) + (isPartial ? '（按已凑到的册比较）' : '') + '</div>';
+      html += '<table><thead><tr><th>店铺</th><th>册数与单册价</th><th>运费</th><th>小计</th></tr></thead><tbody>';
+      plan.forEach((p) => {
+        const items = p.listings.map((L) => {
+          const vols = maskToNames(L.volMask, volumes);
+          const k = exKeyOf(L);
+          const exclBtn = k
+            ? '<button class="kfz-ex" data-key="' + escapeAttr(k) + '" data-title="' + escapeAttr(shortTitle(L.title, 30)) +
+              '" data-shop="' + escapeAttr(L.shopName || '') + '" data-link="' + escapeAttr(L.link || '') +
+              '" data-price="' + (L.price || 0) + '" title="把这条商品加入排除名单，下次检索不再计入">🚫排除</button>'
+            : '';
+          return '<div class="kfz-itemrow">《' + escapeHtml(shortTitle(L.title, 22)) + '》<span class="muted">' + vols + '</span> ' +
+            yuan(L.price) + exclBtn + '</div>';
+        }).join('');
+        html += '<tr>' +
+          '<td class="shop"><a href="' + escapeAttr(p.shop.shopLink) + '" target="_blank" style="color:#c8161d">' + escapeHtml(p.shop.shopName) + '</a></td>' +
+          '<td>' + items + '</td>' +
+          '<td>' + (p.shipping > 0 ? yuan(p.shipping) : '包邮') + '</td>' +
+          '<td>' + yuan(p.subtotal) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+      html += '<div class="kfz-tip">点击店名可进店核对；下单前请确认品相与库存。点“🚫排除”可让该条下次检索不再计入。' + (isDemo ? '（演示数据）' : '') + '</div>';
+      return html;
+    }
+
     // v1.1.6: 防御性 n>30 保护（JS 位运算 mod 32 截断）。正常流程在 kfz-run 已拦，这里兜底 demo/手工调用。
     if (volumes.length > 30) {
       const msg = '❌ 册数过多（' + volumes.length + ' 册），超出位掩码算法上限（30）。请拆成小套搜索。';
@@ -1236,68 +1319,33 @@
       if (blocked) msg += '，或减少“标题排除关键词”/恢复已排除条目（当前因排除少算 ' + blocked + ' 条）';
       if (hitCond.length) msg += '，或放宽“出版社/年份筛选”条件（当前因条件少算 ' + hitCond.length + ' 条）';
       msg += '。';
-      // 结果区显示错误 + 仍渲染“排除管理”折叠区，便于直接删规则/恢复条目救回来
-      let eh = '<div class="kfz-err">❌ ' + escapeHtml(res.error || '无法凑齐') +
-        (blocked ? '（当前因排除少算 ' + blocked + ' 条，可在下方折叠区减少规则或恢复条目）' : '') +
-        (hitCond.length ? '（因出版社/年份条件少算 ' + hitCond.length + ' 条）' : '') + '</div>';
-      eh += '<div class="kfz-tip">' + escapeHtml(res.missing && res.missing.length
-        ? '缺少分册：' + res.missing.map((i) => volumes[i].name).join('、') : '') + '</div>';
+      // v1.2.6: 最上面用醒目 banner 提示缺少哪些分册
+      let eh = '<div class="kfz-missing-banner">❌ 无法凑齐整套';
+      if (res.missing && res.missing.length) eh += '<br>缺少分册：<b>' + res.missing.map((i) => volumes[i].name).join('、') + '</b>';
+      if (blocked || hitCond.length) {
+        eh += '<br><span style="font-size:11px;font-weight:400">';
+        if (blocked) eh += '（当前因排除少算 ' + blocked + ' 条，可在下方折叠区减少规则或恢复条目）';
+        if (hitCond.length) eh += (blocked ? '；' : '（') + '因出版社/年份条件少算 ' + hitCond.length + ' 条' + (blocked ? '' : '）');
+        eh += '</span>';
+      }
+      eh += '</div>';
+      // v1.2.6: 有“最佳部分覆盖”时把已凑到的册的方案也展示出来
+      if (res.partialPlan && res.partialPlan.length) {
+        eh += renderPlanSection(res.partialPlan, res.partialTotal, volumes, effective, true, isDemo);
+        const n = volumes.length;
+        const partialMask = res.partialPlan.reduce((a, p) => a | p.listings.reduce((b, L) => b | L.volMask, 0), 0);
+        let coveredCount = 0; { let mm = partialMask; while (mm) { coveredCount++; mm &= mm - 1; } }
+        logf('✅ 已凑到部分覆盖：' + coveredCount + '/' + n + ' 册，最低 ' + yuan(res.partialTotal) + '（共 ' + res.partialPlan.length + ' 家店）');
+      } else {
+        eh += '<div class="kfz-tip">没有任何店铺命中这些分册，请放宽筛选条件后重试。</div>';
+      }
       eh += renderExcludeBox(book, exRules, hitRules, hitManual);
       result.innerHTML = eh;
       bindExcludeEvents(result, logf, { volumes, listings });
       logf(msg);
       return;
     }
-    const naive = naivePlan(volumes, effective);
-    const saved = naive - res.total;
-
-    // ★ v1.1.7：统计"重复购买"的册（算法用 OR 合并 volMask，允许重叠覆盖——多买也可以，只要总价最便宜）
-    //   例如 店A卖1-7 + 店B卖6-10 → 6、7 买重了，但总价可能仍最低。这里明确告诉用户多买了哪些。
-    const volCount = new Map();
-    res.plan.forEach((p) => {
-      p.listings.forEach((L) => {
-        let m = L.volMask;
-        while (m) {
-          const low = m & -m;
-          const idx = Math.round(Math.log2(low));
-          volCount.set(idx, (volCount.get(idx) || 0) + 1);
-          m &= m - 1;
-        }
-      });
-    });
-    const dupIdx = [...volCount.entries()].filter(([, c]) => c > 1).map(([i]) => i).sort((a, b) => a - b);
-
-    let html = '';
-    html += '<div class="total">💰 最低总价：' + yuan(res.total) + '（共 ' + res.plan.length + ' 家店）</div>';
-    if (dupIdx.length) {
-      const names = dupIdx.map((i) => (volumes[i] ? volumes[i].name : '第' + (i + 1) + '册')).join('、');
-      html += '<div class="kfz-tip kfz-dup">📦 本方案<b>重复购买</b>了 ' + names +
-        '（多家店都含这几册）。多买也算，只要总价最便宜——不想重复可用「🚫排除」去掉某家店。</div>';
-    }
-    html += '<div class="kfz-tip">对比：各册分别买最便宜的（含各自运费）约 ' + yuan(naive) +
-      '，本方案可省 ' + yuan(Math.max(0, saved)) + '</div>';
-    html += '<table><thead><tr><th>店铺</th><th>册数与单册价</th><th>运费</th><th>小计</th></tr></thead><tbody>';
-    res.plan.forEach((p) => {
-      const items = p.listings.map((L) => {
-        const vols = maskToNames(L.volMask, volumes);
-        const k = exKeyOf(L);
-        const exclBtn = k
-          ? '<button class="kfz-ex" data-key="' + escapeAttr(k) + '" data-title="' + escapeAttr(shortTitle(L.title, 30)) +
-            '" data-shop="' + escapeAttr(L.shopName || '') + '" data-link="' + escapeAttr(L.link || '') +
-            '" data-price="' + (L.price || 0) + '" title="把这条商品加入排除名单，下次检索不再计入">🚫排除</button>'
-          : '';
-        return '<div class="kfz-itemrow">《' + escapeHtml(shortTitle(L.title, 22)) + '》<span class="muted">' + vols + '</span> ' +
-          yuan(L.price) + exclBtn + '</div>';
-      }).join('');
-      html += '<tr>' +
-        '<td class="shop"><a href="' + escapeAttr(p.shop.shopLink) + '" target="_blank" style="color:#c8161d">' + escapeHtml(p.shop.shopName) + '</a></td>' +
-        '<td>' + items + '</td>' +
-        '<td>' + (p.shipping > 0 ? yuan(p.shipping) : '包邮') + '</td>' +
-        '<td>' + yuan(p.subtotal) + '</td>' +
-        '</tr>';
-    });
-    html += '</tbody></table>';
-    html += '<div class="kfz-tip">点击店名可进店核对；下单前请确认品相与库存。点“🚫排除”可让该条下次检索不再计入。' + (isDemo ? '（演示数据）' : '') + '</div>';
+    let html = renderPlanSection(res.plan, res.total, volumes, effective, false, isDemo);
 
     // —— 排除统计提示 ——
     if (hitRules.length || hitManual.length) {
