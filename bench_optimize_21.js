@@ -53,6 +53,8 @@ const sandbox = [
   optCode,
   // 装个"回溯补丁"：在 optimize 末尾、return 之前把 dp[FULL]/choice 链打出来
   "globalThis.__bench_patch = (orig) => async function(volumes, listings, opts) { const r = await orig(volumes, listings, opts); console.log('[bench] 返回 ok=' + r.ok + ' total=' + (r.total === Infinity ? 'Inf' : r.total) + ' plan.length=' + (r.plan ? r.plan.length : 'no-plan')); return r; };",
+  // v1.3.3: optimize() 在 3 处查 STATE.aborted / STATE.etaCtx (v1.3.1/3.2 global 让位 + v1.3.3 local DP 让位 + 每店 loop 顶),sandbox 必须注入 STATE
+  "const STATE = { aborted: false, etaCtx: null };",
   "globalThis.__opt = optimize; globalThis.__yield = yieldToBrowser; globalThis.__cfg = CONFIG;",
 ].join("\n");
 try {

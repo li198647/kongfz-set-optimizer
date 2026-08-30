@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.3.0
+// @version     1.3.2
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -49,10 +49,10 @@
   };
 
   // 模块级状态（当前整套的基础书名，用于紧贴匹配）
-  let STATE = { base: '' };
+  let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.3.0';
+  const SCRIPT_VERSION = '1.3.2';
 
   /* ============================================================
    * 工具函数
@@ -526,6 +526,7 @@
     const pageSize = CONFIG.pageSize;
     if (CONFIG.debug) console.log('[kfz] searchKeyword START keyword="' + keyword + '" pages=' + pagesToFetch);
     for (let p = 1; p <= pagesToFetch; p++) {
+      if (STATE.aborted) throw new Error('用户终止了计算');   // v1.3.1: 翻页间隙即可中止
       let url = CONFIG.apiBase + '?keyword=' + encodeURIComponent(keyword) +
         '&page=' + p + '&pageSize=' + pageSize;
       if (CONFIG.userArea) url += '&userArea=' + CONFIG.userArea;
@@ -615,6 +616,7 @@
     //    v1.1.11: 册间 sleep(CONFIG.delayMs)（350ms 默认）防反爬——之前只有 setTimeout(0)≈0ms，
     //             10 册连续快请求会触发孔网限流/反爬（用户实测每次卡在第 8 册）
     for (let i = 0; i < n; i++) {
+      if (STATE.aborted) throw new Error('用户终止了计算');   // v1.3.1: 逐册间隙即可中止
       const _t0 = performance.now();
       if (CONFIG.debug) console.log('[kfz] vol ' + (i + 1) + '/' + n + ' START keyword="' + volumes[i].keyword + '"  t=' + _t0.toFixed(0));
       let items = [];
@@ -760,7 +762,10 @@
             }
           }
         }
-        if (bigN && (i & 0xF) === 0xF) await yieldToBrowser();
+        if (bigN && (i & 0xF) === 0xF) {
+          if (STATE.aborted) throw new Error('用户终止了计算');   // v1.3.1: 本店内部 DP 每 16 条即查中止
+          await yieldToBrowser();
+        }
       }
 
       // 回溯（局部空间，返回的 picks 是全局 listing 对象，正确）
@@ -793,7 +798,10 @@
         else { if (nf[mask] < Infinity) { cost = nf[mask]; which = 'nf'; } else continue; }
         configMap.set(localToGlobal(mask), { cost, picks: backtrack(which, mask) });
         // LN1 通常极小，无需让位；仅超大规模单店（LN1>65536）才 yield
-        if (bigN && LN1 > 65536 && (mask & 0xFFFF) === 0xFFFF) await yieldToBrowser();
+        if (bigN && LN1 > 65536 && (mask & 0xFFFF) === 0xFFFF) {
+          if (STATE.aborted) throw new Error('用户终止了计算');   // v1.3.1: 本店 configMap DP 中途可中止
+          await yieldToBrowser();
+        }
       }
 
       if (CONFIG.debug) {
@@ -814,6 +822,8 @@
     let shopIdx = 0;
     const inChg = new Uint8Array(N1);   // 复用标记，记录本店被更新的 mask
     for (const sc of shopConfigs) {
+      // v1.3.1: 每店 loop 顶先查 aborted（不在此 yield，避免 N×4ms 性能累加退步），确保按"终止计算"后即刻停止
+      if (STATE.aborted) throw new Error('用户终止了计算');
       shopIdx++;
       const nd = Float64Array.from(dp);
       const nparent = Int32Array.from(parent);
@@ -849,11 +859,15 @@
             if (!inChg[nmask]) { inChg[nmask] = 1; changed.push(nmask); }
           }
         }
-        // 全局 DP 让位：每 262144 次迭代才检查一次时间（避免热循环每次调 _t() 拖垮性能），>50ms 才 yield 保不冻屏
-        if (bigN && (++chk & 0x3FFFF) === 0 && _t() - lastYield > 50) {
-          lastYield = _t();
-          if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + ' mask=' + mask + '/' + N1 + ' updates=' + updates);
-          await yieldToBrowser();
+        // 全局 DP 让位 + 中止检查：每 65536 次裸读 STATE.aborted（~0.5-1ms 即响应，开销可忽略），命中即抛错；
+        // 真 yield 仍按 >50ms 时间预算触发（避免热循环里无谓 yield，保持 v1.1.18 性能铁律）
+        if (bigN && (++chk & 0xFFFF) === 0) {
+          if (STATE.aborted) throw new Error('用户终止了计算');
+          if (_t() - lastYield > 50) {
+            lastYield = _t();
+            if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + ' mask=' + mask + '/' + N1 + ' updates=' + updates);
+            await yieldToBrowser();
+          }
         }
       }
       // 只提交被本店改变的 mask（避免每店全量 2^n 写回）
@@ -958,6 +972,9 @@
       #kfz-panel .row>*{flex:1}
       #kfz-panel button{margin-top:8px;padding:8px 10px;border:0;border-radius:6px;background:#c8161d;color:#fff;cursor:pointer;font-size:13px}
       #kfz-panel button.sec{background:#f0f0f0;color:#333}
+      #kfz-panel button.warn{background:#fff;color:#c8161d;border:1px solid #c8161d}
+      #kfz-panel button.warn:hover{background:#fdecec}
+      #kfz-panel button.warn.stopping{background:#ff8c00;color:#fff;border-color:#ff8c00}  /* v1.3.2: 按下后置“终止中”高亮态，告知用户已生效 */
       #kfz-panel button:hover{opacity:.9}
       #kfz-log{margin-top:8px;max-height:120px;overflow:auto;background:#fafafa;border:1px solid #eee;border-radius:6px;padding:6px 8px;font-size:12px;color:#444;white-space:pre-wrap}
       #kfz-result{margin:0}                       /* 顶部留白由 wrap 提供 */
@@ -1059,6 +1076,7 @@
         <div class="kfz-tip">标题里<b>原样连续包含</b>这些字符串的商品，一律不参与比价（用于批量排除“店主把标题写错”的商品）。换一套书会自动切换成那本书的规则。</div>
         <div class="row">
           <button id="kfz-run">🚀 开始智能凑单</button>
+          <button class="warn" id="kfz-stop" style="display:none">⏹ 终止计算</button>
           <button class="sec" id="kfz-demo">演示</button>
         </div>
         <div id="kfz-log"></div>
@@ -1186,9 +1204,25 @@
       volInput.value = lines.join('\n');
     };
 
+    const stopBtn = $('#kfz-stop', panel);
+    // v1.3.1: 终止计算按钮——单向置位 aborted，所有热循环检查到即抛出，最迟 ~1ms 内响应
+    stopBtn.onclick = () => {
+      if (STATE.aborted) return;          // v1.3.2: 已按下则忽略重复点击
+      STATE.aborted = true;
+      stopBtn.classList.add('stopping');  // v1.3.2: 橙色高亮 + 文字变“终止中…”，告知用户已生效
+      stopBtn.textContent = '终止中…';
+      logf('⏹ 正在终止计算…（稍候）');
+    };
+
     $('#kfz-demo', panel).onclick = () => {
       resetOut();
-      runWith(gatherMock(), logf, result, true, condInput ? condInput.value : '');   // fire-and-forget（演示数据无大 n）
+      STATE.aborted = false;
+      const btn = $('#kfz-run', panel); btn.disabled = true; btn.textContent = '演示中…';
+      stopBtn.classList.remove('stopping'); stopBtn.textContent = '⏹ 终止计算'; stopBtn.style.display = '';
+      const finish = () => { btn.disabled = false; btn.textContent = '🚀 开始智能凑单'; stopBtn.classList.remove('stopping'); stopBtn.textContent = '⏹ 终止计算'; stopBtn.style.display = 'none'; };
+      runWith(gatherMock(), logf, result, true, condInput ? condInput.value : '')
+        .catch((e) => { if (!/用户终止了计算|aborted/i.test(e && e.message)) logf('出错：' + e.message); else logf('⏹ 已终止计算。'); })
+        .finally(finish);
     };
 
     $('#kfz-run', panel).onclick = async () => {
@@ -1207,8 +1241,10 @@
       GM_setValue('kfz_cond', condInput.value);   // v1.2.2: 持久化出版社/年份筛选条件
       persistExRules();                   // 保存这套书的标题排除关键词
       STATE.base = setInput.value.trim(); // 用于严格紧贴匹配
+      STATE.aborted = false;              // v1.3.1: 新一轮运行清除上轮中止标志
       const volumes = lines.map((kw, i) => ({ name: '第' + (i + 1) + '册', keyword: kw }));
       const btn = $('#kfz-run', panel); btn.disabled = true; btn.textContent = '检索中…';
+      stopBtn.classList.remove('stopping'); stopBtn.textContent = '⏹ 终止计算'; stopBtn.style.display = '';  // v1.3.2: 显示并复位为高亮前的“终止计算”态
       try {
         logf('开始跨店检索，共 ' + volumes.length + ' 册…');
         const { listings, perVolumeCount } = await gatherListings(volumes,
@@ -1217,9 +1253,14 @@
         logf('检索完成，候选条目 ' + listings.length + ' 条，开始计算最优组合…');
         await runWith({ volumes, listings }, logf, result, false, condInput ? condInput.value : '');
       } catch (e) {
-        logf('出错：' + e.message);
+        if (/用户终止了计算|aborted/i.test(e && e.message)) {
+          logf('⏹ 已终止计算。');
+        } else {
+          logf('出错：' + e.message);
+        }
       } finally {
         btn.disabled = false; btn.textContent = '🚀 开始智能凑单';
+        stopBtn.classList.remove('stopping'); stopBtn.textContent = '⏹ 终止计算'; stopBtn.style.display = 'none';   // v1.3.2: 复位并隐藏终止按钮
       }
     };
 
