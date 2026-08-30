@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.2.4
+// @version     1.2.5
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '' };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.2.4';
+  const SCRIPT_VERSION = '1.2.5';
 
   /* ============================================================
    * 工具函数
@@ -1040,11 +1040,12 @@
     const logf = (msg) => { log.textContent += msg + '\n'; log.scrollTop = log.scrollHeight; };
     const resetOut = () => { result.innerHTML = ''; log.textContent = ''; };
 
-    // ===== 标题排除关键词：按书名隔离 =====
-    // 书名一变，就换成该书名自己的规则（没有则为空），实现“换一套书自动清空”。
-    const reloadExRules = () => {
-      const book = setInput.value.trim();
-      exRulesInput.value = loadExRules(book).join('\n');
+    // ===== 标题排除关键词 / 出版社年份条件：书名变化即恢复默认说明状态 =====
+    // “整套书名”框内容一旦改变，就把“出版社/年份筛选”和“标题排除关键词”两个条件框
+    // 同时清空回初始占位说明（placeholder 灰字），避免旧书的条件/排除词误套到新书。
+    const resetAuxInputs = () => {
+      condInput.value = '';        // 出版社/年份筛选 → 恢复说明占位
+      exRulesInput.value = '';     // 标题排除关键词 → 恢复说明占位
     };
     const persistExRules = () => {
       saveExRules(setInput.value.trim(), parseExRules(exRulesInput.value));
@@ -1058,8 +1059,8 @@
         logf('🔁 已按新的排除关键词重新计算');
       }
     };
-    setInput.addEventListener('input', reloadExRules);
-    setInput.addEventListener('change', reloadExRules);
+    setInput.addEventListener('input', resetAuxInputs);
+    setInput.addEventListener('change', resetAuxInputs);
     exRulesInput.addEventListener('change', applyExRules); // 改完即存并重算，防止没点搜索就丢
 
     // 拖拽
@@ -1097,7 +1098,7 @@
       if (!kw) { logf('⚠ 未检测到孔夫子搜索关键字（请先在网站搜索框输入并搜索）'); return; }
       setInput.value = kw;
       GM_setValue('kfz_set', kw);
-      reloadExRules(); // 书名变了 → 切换到这套书自己的排除规则
+      resetAuxInputs(); // 书名变了 → 两个条件框恢复默认说明状态
       logf('⬇ 已从孔夫子搜索栏填入『整套书名』：' + kw);
     };
     // 自动跟随：URL 的 keyword 变化时自动同步（整页跳转后 init 会触发一次）；用户正手动在脚本栏输入时不打断
@@ -1109,7 +1110,7 @@
         _lastUrlKw = kw;
         if (document.activeElement === setInput) return; // 用户正在脚本里手填，别覆盖
         setInput.value = kw; GM_setValue('kfz_set', kw);
-        reloadExRules(); // 书名变了 → 切换到这套书自己的排除规则
+        resetAuxInputs(); // 书名变了 → 两个条件框恢复默认说明状态
         logf('🔄 已自动跟随网站搜索关键字：' + kw);
       } else if (!kw) { _lastUrlKw = null; }
     };
