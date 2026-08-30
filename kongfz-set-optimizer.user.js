@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.2.7
+// @version     1.3.0
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '' };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.2.7';
+  const SCRIPT_VERSION = '1.3.0';
 
   /* ============================================================
    * 工具函数
@@ -1044,6 +1044,7 @@
           <div>
             <label>册数</label>
             <input id="kfz-count" value="${escapeAttr(savedCount)}" />
+            <div class="kfz-tip">最好不要超过 15，会很慢。</div>
           </div>
           <div>
             <label>&nbsp;</label>
