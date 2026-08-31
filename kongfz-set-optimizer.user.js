@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.1
+// @version     1.4.2
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.1';
+  const SCRIPT_VERSION = '1.4.2';
 
   /* ============================================================
    * 工具函数
@@ -981,6 +981,7 @@
       #kfz-panel .kfz-plan-switch .ps:hover{background:#fdecec}
       #kfz-panel .kfz-plan-switch .ps.active{background:#c8161d;color:#fff}
       #kfz-panel .kfz-plan-switch .ps:disabled{opacity:.4;cursor:not-allowed;border-color:#ccc;color:#999;background:#f5f5f5}
+      #kfz-panel .kfz-plan-switch .ps.loading{opacity:.6;cursor:default;border-style:dashed}
       #kfz-panel button.warn.stopping{background:#ff8c00;color:#fff;border-color:#ff8c00}  /* v1.3.2: 按下后置“终止中”高亮态，告知用户已生效 */
       #kfz-panel button:hover{opacity:.9}
       #kfz-log{margin-top:8px;max-height:120px;overflow:auto;background:#fafafa;border:1px solid #eee;border-radius:6px;padding:6px 8px;font-size:12px;color:#444;white-space:pre-wrap}
@@ -1279,6 +1280,8 @@
     } catch (e) {}
   }
 
+  let _planGen = 0;  // v1.4.2: 方案计算代次，防止重入时旧的后台计算误写新的 DOM
+
   async function runWith(data, logf, result, isDemo, condStrIn) {
     const { volumes, listings } = data;
     // v1.2.6: 抽 renderPlanSection，成功与“凑不齐有部分覆盖”两种场景共用方案表格渲染
@@ -1374,20 +1377,12 @@
       const arr = r.ok ? r.plan : (r.partialPlan || []);
       return arr.map((p) => (p.shop && p.shop.shopId)).filter(Boolean);
     };
+    // v1.4.2: 先算第1方案并立即渲染，第2/第3方案在后台接着算，不阻塞第1方案的显示
+    const labels = ['第一方案', '第二方案', '第三方案'];
+    const views = [null, null, null];   // 预分配，第1立即填，第2/3后台算完再填
     const plans = [];
     let leftover = effective;
     const usedShopIds = new Set();
-    for (let k = 1; k <= 3; k++) {
-      if (STATE.aborted) break;
-      logf('🧮 计算第' + k + '方案…' + (k > 1 ? '（已避开前 ' + (k - 1) + ' 个方案用过的店铺）' : ''));
-      const r = await optimize(volumes, leftover, {});
-      plans.push(r);
-      const sids = shopIdsOf(r);
-      if (!sids.length) break;                 // 该方案没用到任何店，再排除无意义
-      sids.forEach((id) => usedShopIds.add(id));
-      leftover = leftover.filter((L) => !usedShopIds.has(L.shopId));
-      if (!leftover.length) break;
-    }
 
     // 把 optimize 结果规范成可渲染视图（ok=完整覆盖；否则取部分覆盖；都没有=无方案）
     const viewOf = (r) => {
@@ -1396,13 +1391,20 @@
       if (r.partialPlan && r.partialPlan.length) return { isPartial: true, total: r.partialTotal, plan: r.partialPlan, missing: r.missing };
       return null;
     };
-    const views = plans.map(viewOf);
+
+    // —— 1) 先算第1方案 ——
+    logf('🧮 计算第1方案…');
+    const r0 = await optimize(volumes, leftover, {});
+    plans[0] = r0;
+    const s0 = shopIdsOf(r0);
+    if (s0.length) s0.forEach((id) => usedShopIds.add(id));
+    views[0] = viewOf(r0);
 
     // 一个方案都没有（极罕见：过滤后无可用条目）→ 简版错误提示
     if (!views[0]) {
-      let msg = '❌ ' + ((plans[0] && plans[0].error) || '无法凑齐');
-      if (plans[0] && plans[0].missing && plans[0].missing.length) {
-        msg += '。缺少分册：' + plans[0].missing.map((i) => volumes[i].name + '（' + volumes[i].keyword + '）').join('、');
+      let msg = '❌ ' + ((r0 && r0.error) || '无法凑齐');
+      if (r0 && r0.missing && r0.missing.length) {
+        msg += '。缺少分册：' + r0.missing.map((i) => volumes[i].name + '（' + volumes[i].keyword + '）').join('、');
       }
       msg += '。可尝试：放宽品相/包邮筛选、调大“每册搜索页数”、或减少“标题排除关键词”/恢复已排除条目。';
       result.innerHTML = '<div class="kfz-err">' + escapeHtml(msg).replace(/\n/g, '<br>') +
@@ -1414,10 +1416,10 @@
 
     // 顶部“无法凑齐整套”红底 banner：仅在第1方案本身即部分覆盖时提示缺哪几册
     let eh = '';
-    if (!plans[0].ok && plans[0].missing && plans[0].missing.length) {
+    if (!r0.ok && r0.missing && r0.missing.length) {
       const blocked = hitRules.length + hitManual.length;
       eh += '<div class="kfz-missing-banner">❌ 无法凑齐整套<br>缺少分册：<b>' +
-        plans[0].missing.map((i) => volumes[i].name).join('、') + '</b>';
+        r0.missing.map((i) => volumes[i].name).join('、') + '</b>';
       if (blocked || hitCond.length) {
         eh += '<br><span style="font-size:11px;font-weight:400">';
         if (blocked) eh += '（当前因排除少算 ' + blocked + ' 条，可在下方折叠区减少规则或恢复条目）';
@@ -1427,13 +1429,11 @@
       eh += '</div>';
     }
 
-    // v1.4.1: 方案切换条（默认显示第1方案；第2/3按钮在其方案不可用时置灰）。三个按钮常驻，小一号。
-    const labels = ['第一方案', '第二方案', '第三方案'];
+    // v1.4.2: 方案切换条。第1默认高亮；第2/3初始显示“计算中…”并禁用，后台算完再点亮
     eh += '<div class="kfz-plan-switch" id="kfz-plan-switch"><span class="kfz-ps-label">方案：</span>';
-    for (let i = 0; i < 3; i++) {
-      const dis = !views[i] ? ' disabled' : '';
-      eh += '<button class="ps' + (i === 0 ? ' active' : '') + '" data-i="' + i + '"' + dis + '>' + labels[i] + '</button>';
-    }
+    eh += '<button class="ps active" data-i="0">第一方案</button>';
+    eh += '<button class="ps loading" data-i="1" disabled>第二方案（计算中…）</button>';
+    eh += '<button class="ps loading" data-i="2" disabled>第三方案（计算中…）</button>';
     eh += '</div><div id="kfz-plan-body"></div>';
 
     // —— 排除统计提示 ——
@@ -1450,7 +1450,9 @@
     // 传回“未被过滤的原始 listings”，保证 rerun 幂等（由 runWith 自己重新过滤，不会越过滤越少）
     bindExcludeEvents(result, logf, { volumes, listings });
 
-    // v1.4.1: 渲染某个方案的正文（默认第1，按钮切换第2/3）
+    const switchEl = document.getElementById('kfz-plan-switch');
+
+    // v1.4.2: 渲染某个方案的正文（默认第1，按钮切换第2/3）。views[i] 为空时（未算完/无方案）不渲染
     const renderBody = (idx) => {
       const v = views[idx];
       const body = document.getElementById('kfz-plan-body');
@@ -1475,9 +1477,45 @@
       });
     });
 
-    const firstView = views[0];
-    logf((firstView.isPartial ? '✅ 已算出部分覆盖方案，总价 ' : '✅ 已算出最优跨店组合，总价 ') + yuan(firstView.total) +
-      (views[1] || views[2] ? '；可点「第二/第三方案」看避开同店的备选组合' : ''));
+    logf((views[0].isPartial ? '✅ 已算出部分覆盖方案，总价 ' : '✅ 已算出最优跨店组合，总价 ') + yuan(views[0].total) +
+      '；第2/第3方案正在后台计算…');
+
+    // —— 2) 后台接着算第2、第3方案（不阻塞第1方案的显示）——
+    const myGen = ++_planGen;   // 重入保护：若用户重新运行，旧的 computeMore 不再写 DOM
+    const computeMore = async () => {
+      let lf = leftover.filter((L) => !usedShopIds.has(L.shopId));
+      for (let k = 2; k <= 3; k++) {
+        if (STATE.aborted || myGen !== _planGen) return;
+        if (!lf.length) break;
+        logf('🧮 计算第' + k + '方案…（已避开前 ' + (k - 1) + ' 个方案用过的店铺）');
+        const r = await optimize(volumes, lf, {});
+        if (myGen !== _planGen) return;
+        plans[k - 1] = r;
+        const sids = shopIdsOf(r);
+        const v = viewOf(r);
+        views[k - 1] = v;
+        const btn = switchEl ? switchEl.querySelector('[data-i="' + (k - 1) + '"]') : null;
+        if (btn) {
+          btn.classList.remove('loading');
+          if (v) {
+            btn.disabled = false;
+            btn.textContent = labels[k - 1];
+          } else {
+            btn.disabled = true;
+            btn.textContent = labels[k - 1] + '（无）';
+          }
+        }
+        if (!sids.length) break;
+        sids.forEach((id) => usedShopIds.add(id));
+        lf = lf.filter((L) => !usedShopIds.has(L.shopId));
+        if (!lf.length) break;
+      }
+      if (myGen !== _planGen) return;
+      const avail = [];
+      for (let i = 1; i < 3; i++) if (views[i]) avail.push(labels[i]);
+      if (avail.length) logf('✅ 第2/第3方案计算完成，可点『' + avail.join('、') + '』看避开同店的备选组合');
+    };
+    void computeMore();
   }
 
   // 渲染结果区底部的“排除管理”折叠区（规则 + 已排除条目）
