@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.3
+// @version     1.4.4
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.3';
+  const SCRIPT_VERSION = '1.4.4';
 
   /* ============================================================
    * 工具函数
@@ -956,9 +956,14 @@
         font:13px/1.5 -apple-system,'Microsoft YaHei',sans-serif;color:#222;}
       #kfz-panel *{box-sizing:border-box}
       #kfz-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#c8161d;color:#fff;
-        border-radius:10px 10px 0 0;cursor:move;font-weight:700;flex:0 0 auto}
-      /* 收起态：仅剩标题栏，底部也需圆角 */
-      #kfz-panel.kfz-collapsed #kfz-head{border-radius:10px;opacity:.5}
+        border-radius:10px 10px 0 0;cursor:move;font-weight:700;flex:0 0 auto;white-space:nowrap}
+      #kfz-head .compact-tag{display:none;align-items:center}
+      /* 收起态：仅剩标题栏，底部也需圆角；面板变窄不再堵视线 */
+      #kfz-panel.kfz-collapsed{width:auto;max-width:200px}
+      #kfz-panel.kfz-collapsed #kfz-head{border-radius:10px;padding:8px 10px;gap:6px;opacity:1}
+      #kfz-panel.kfz-collapsed #kfz-head .long{display:none}
+      #kfz-panel.kfz-collapsed #kfz-head .compact-tag{display:inline-flex}
+      #kfz-panel.kfz-collapsed #kfz-head #kfz-fill{display:none}
       #kfz-head .x{cursor:pointer;opacity:.85;font-weight:400}
       #kfz-head #kfz-fill{font-size:12px;padding:1px 6px;margin-right:6px;border:1px solid rgba(255,255,255,.65);border-radius:4px}
       #kfz-head #kfz-fill:hover{background:rgba(255,255,255,.2);opacity:1}
@@ -1057,7 +1062,7 @@
     const savedExRules = loadExRules(String(savedSet || '').trim()).join('\n');
 
     panel.innerHTML = `
-      <div id="kfz-head"><span>📚 孔网合集跨店凑单 v${SCRIPT_VERSION}</span><span style="display:flex;align-items:center"><span class="x" id="kfz-fill" title="把孔夫子搜索栏已提交的关键字填入『整套书名』栏">⬇ 填字</span><span class="x" id="kfz-close">展开 ▴</span></span></div>
+      <div id="kfz-head"><span class="long">📚 孔网合集跨店凑单 v${SCRIPT_VERSION}</span><span class="compact-tag">📚 跨店凑单</span><span style="display:flex;align-items:center"><span class="x" id="kfz-fill" title="把孔夫子搜索栏已提交的关键字填入『整套书名』栏">⬇ 填字</span><span class="x" id="kfz-close">展开 ▴</span></span></div>
       <div id="kfz-result-wrap"><div id="kfz-result"></div></div>
       <div id="kfz-body" style="display:none">
         <label>整套书名 / 系列名</label>
