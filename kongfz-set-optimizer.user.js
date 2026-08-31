@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.10
+// @version     1.4.11
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.10';
+  const SCRIPT_VERSION = '1.4.11';
 
   /* ============================================================
    * 工具函数
@@ -951,6 +951,9 @@
   // 多启发式找孔夫子筛选条的「店铺」输入框
   // v1.4.9: 木木灌入独特字符串反推 URL 已确认——筛选条店铺输入框 name=shopName（&shopName=...&actionPath=shopName）
   //         故「金标准」= input[name="shopName"]，只在这上面做精确排除，不再猜 shop_name/storeName 等（那些是 v1.4.7 猜错根源）
+  // v1.4.11: 删除「在 form/filter 容器里」那个盲兜底（它会抓到价格/品相等无关 input 误填），
+  //          找不到金标准时直接返回 null，让点击处理器给出明确"请先展开筛选条"提示。
+  //          孔网搜索页的"店铺"筛选条默认是收起的，name=shopName 的 input 不在 DOM 里 → 必须先展开。
   function findShopFilterInput() {
     const isVisible = (el) => {
       if (!el || el.offsetParent === null) return false;
@@ -998,38 +1001,76 @@
       const prev = ((inp.parentElement && inp.parentElement.textContent) || '').replace(inp.value || '', '');
       if (prev.indexOf('店铺') !== -1 && prev.length < 12) return inp;
     }
-    const inFilterArea = allInputs.filter((el) => {
-      let n = el; while (n && n !== document.body) {
-        if (n.matches && n.matches('form, .filter, .screening, [class*="filter" i], [class*="screen" i], [class*="condition" i]')) return true;
-        n = n.parentElement;
-      }
-      return false;
-    });
-    if (inFilterArea.length) return inFilterArea[0];
 
+    // ⑤ 删 v1.4.11：原"在 form/filter 容器内"盲兜底已移除——它会抓价格/品相等无关 input 误填。
+    //    找不到金标准或明确的"店铺"文字关联时，返回 null，交给点击处理器给出"请先展开筛选条"提示。
     return null;
   }
 
-  // v1.4.10: 调试函数——F12 Console 跑 __kfzDebugShopInputs() 打印所有候选店铺输入框的真实 DOM 信息（name/坐标/祖先/是否顶部）
+  // v1.4.11: 调试函数——F12 Console 跑 __kfzDebugShopInputs()，分三档展示 + 给出明确诊断结论
   // 关键坑：油猴在 @grant 下运行于「隔离沙箱」，window.xxx = 函数 这种属性赋值只写进沙箱副本，不会穿透到网页真实 window，
   //        所以控制台里调用不到。必须把函数体以 <script> 注入页面真实上下文，才能从控制台访问。
   function __kfzDebugShopInputs() {
-    const all = Array.from(document.querySelectorAll(
-      'input[name="shopName"], input[placeholder*="店铺" i], input[placeholder*="店名" i], input[id*="shop" i], input[id*="store" i]'
-    ));
-    const out = all.map((el, i) => {
+    const isVisible = (el) => el && el.offsetParent !== null && el.getBoundingClientRect().width >= 30;
+    const inTopSearchLite = (el) => {
+      let n = el;
+      while (n && n !== document.body) {
+        if (n.matches && n.matches('header, nav, .header, .nav, .top-bar, .topbar, .search-bar, .search-header, .global-search, .site-header, .layout-header')) return true;
+        n = n.parentElement;
+      }
+      return false;
+    };
+    const fmt = (el) => {
       const r = el.getBoundingClientRect();
       let anc = ''; let n = el.parentElement; let d = 0;
-      while (n && d < 4) {
+      while (n && d < 3) {
         anc += ' > ' + n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') +
           (typeof n.className === 'string' && n.className ? '.' + n.className.trim().split(/\s+/).join('.') : '');
         n = n.parentElement; d++;
       }
-      let area = '-'; let m = el;
-      while (m && m !== document.body) { if (m.matches && m.matches('header,nav,.header,.nav,.top-bar,.search-bar,.site-header')) { area = 'TOP'; break; } m = m.parentElement; }
-      return '#' + i + ' name="' + el.name + '" ph="' + el.placeholder + '" rect=(' + Math.round(r.left) + ',' + Math.round(r.top) + ')' + Math.round(r.width) + 'x' + Math.round(r.height) + ' vis=' + (el.offsetParent !== null) + ' area=' + area + '\n    ' + anc;
-    });
-    const msg = '[kfz-debug] 候选店铺输入框(' + all.length + '个):\n' + out.join('\n');
+      return '    name="' + el.name + '" ph="' + (el.placeholder||'') + '" rect=(' + Math.round(r.left) + ',' + Math.round(r.top) + ')' + Math.round(r.width) + 'x' + Math.round(r.height) + ')' + anc;
+    };
+
+    // Tier 1：金标准 name="shopName"
+    const t1 = Array.from(document.querySelectorAll('input[name="shopName"]')).filter(isVisible);
+    // Tier 2：placeholder / label / 紧邻文本含"店铺"
+    const t2 = Array.from(document.querySelectorAll('input[placeholder*="店铺" i], input[placeholder*="店名" i]')).filter(isVisible).filter((el) => !inTopSearchLite(el));
+    // Tier 3（信息）：所有在 filter/screening 容器内的可见 input（不参与自动填值，仅供展开筛选条后核对）
+    const t3 = Array.from(document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])'))
+      .filter(isVisible).filter((el) => {
+        let n = el; while (n && n !== document.body) {
+          if (n.matches && n.matches('.filter, .screening, [class*="filter" i], [class*="screen" i], [class*="condition" i]')) return true;
+          n = n.parentElement;
+        }
+        return false;
+      });
+
+    const lines = [];
+    lines.push('[kfz-debug] 分三档扫描"店铺"输入框：');
+    lines.push('  Tier1 (金标准 name="shopName"): ' + t1.length + ' 个');
+    t1.forEach((el, i) => lines.push('   #' + i + (inTopSearchLite(el) ? ' [TOP-顶部搜索栏-会排除]' : ' [筛-可用]') + '\n' + fmt(el)));
+    lines.push('  Tier2 (placeholder/labels 含"店铺"): ' + t2.length + ' 个');
+    t2.forEach((el, i) => lines.push('   #' + i + '\n' + fmt(el)));
+    lines.push('  Tier3 (筛选项容器内所有可见 input, 仅供展开后核对): ' + t3.length + ' 个');
+    t3.forEach((el, i) => lines.push('   #' + i + '\n' + fmt(el)));
+
+    // 明确诊断结论
+    if (t1.length === 0 && t2.length === 0) {
+      lines.push('');
+      lines.push('【结论】当前 DOM 里完全没有"店铺"输入框。');
+      lines.push('  原因：孔网搜索页的"店铺"筛选条默认是收起的，name=shopName 的 input 还没渲染出来。');
+      lines.push('  解决：先在页面上点「筛选 / 更多筛选 / 店铺筛选」按钮把筛选条展开，再点店名。');
+      lines.push('  验证：展开后再跑一次 __kfzDebugShopInputs()，应看到 Tier1=1 且标注 [筛-可用]。');
+    } else if (t1.length >= 1) {
+      const ok = t1.filter((el) => !inTopSearchLite(el)).length;
+      lines.push('');
+      lines.push('【结论】找到 ' + ok + ' 个可用的"店铺"输入框（name="shopName"）。点店名会自动填入。');
+    } else {
+      lines.push('');
+      lines.push('【结论】没有金标准 name=shopName，但有 Tier2 候选（按 placeholder/label 关联）。点店名会用 Tier2 兜底填入。');
+    }
+
+    const msg = lines.join('\n');
     try { console.log(msg); } catch (_) {}
     return msg;
   }
@@ -1084,9 +1125,14 @@ function installShopNameClickInterceptor(logf) {
       flash(input);
       pasted = true;
     }
-    if (pasted)      log2('🛒 已' + (copied ? '复制并填入' : '填入') + '「店铺」筛选条：' + name);
-    else if (copied) log2('📋 已复制店名（未找到店铺输入框，请 Ctrl+V 到筛选条）：' + name);
-    else             log2('⚠ 复制失败（剪贴板权限被拒）。请手动 Ctrl+C 店名后到「店铺」筛选条粘贴：' + name);
+    if (pasted) {
+      log2('🛒 已' + (copied ? '复制并填入' : '填入') + '「店铺」筛选条：' + name);
+    } else {
+      // v1.4.11: 找不到「店铺」输入框 = 孔网筛选条默认收起，name=shopName 的 input 不在 DOM。
+      //          已复制到剪贴板（仍有用），但不要乱填别的 input。明确告诉木木怎么把 input 召出来。
+      log2('📋 已复制店名到剪贴板：' + name);
+      log2('⚠ 没找到「店铺」输入框——孔网筛选条默认是收起的，请先在页面上点『筛选 / 更多筛选 / 店铺筛选』把它展开（让"店铺"输入框出现在 DOM 里），再点店名。展开后也可跑 F12 里的 __kfzDebugShopInputs() 核查。');
+    }
   };
 
   document.addEventListener('click', (e) => {
