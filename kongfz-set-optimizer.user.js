@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.8
+// @version     1.4.9
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.8';
+  const SCRIPT_VERSION = '1.4.9';
 
   /* ============================================================
    * 工具函数
@@ -948,62 +948,56 @@
   /* ============================================================
    * v1.4.6/v1.4.8: 孔夫子原搜索列表店名点击拦截 → 填入筛选条「店铺」输入框
    * ============================================================ */
-  // 多启发式找孔夫子筛选条的「店铺」输入框（v1.4.8: 加固——避开顶部搜索栏里的店铺名搜索框）
+  // 多启发式找孔夫子筛选条的「店铺」输入框
+  // v1.4.9: 木木灌入独特字符串反推 URL 已确认——筛选条店铺输入框 name=shopName（&shopName=...&actionPath=shopName）
+  //         故「金标准」= input[name="shopName"]，只在这上面做精确排除，不再猜 shop_name/storeName 等（那些是 v1.4.7 猜错根源）
   function findShopFilterInput() {
     const isVisible = (el) => {
       if (!el || el.offsetParent === null) return false;
       const r = el.getBoundingClientRect(); if (r.width < 30 || r.height < 10) return false;
       return true;
     };
-    // 0) 排除顶部搜索栏（含「店铺名」搜索的那个 form，多半在 header/nav/top-bar 内）
-    const isInTopSearch = (el) => {
-      let n = el; while (n && n !== document.body) {
-        if (n.matches && (n.matches('header, nav, .header, .nav, .top-bar, .search-bar, .search-header'))) return true;
-        const id = (n.id || '').toLowerCase(); const cls = (n.className && typeof n.className === 'string') ? n.className.toLowerCase() : '';
-        if (/search[-_ ]?(bar|head|top|nav|form)/.test(id + ' ' + cls)) return true;
+    // 判定是否在「顶部全局搜索栏」内（区别于筛选条）。特征：
+    //   ① 祖先是 header/nav/.top-bar/.search-bar/.site-header 等
+    //   ② 祖先 form 的 action 指向搜索（含 item_result / search / keyword）—— 筛选条 form 一般不带这些
+    const inTopSearch = (el) => {
+      let n = el;
+      while (n && n !== document.body) {
+        if (n.matches && n.matches('header, nav, .header, .nav, .top-bar, .topbar, .search-bar, .search-header, .global-search, .site-header, .layout-header')) return true;
+        const id = (n.id || '').toLowerCase();
+        const cls = (n.className && typeof n.className === 'string') ? n.className.toLowerCase() : '';
+        if (/(^|[-_ ])(search|top|nav|head)([-_ ]|$)/.test(id + ' ' + cls)) return true;
+        if (n.matches && n.matches('form')) {
+          const sig = (n.getAttribute('action') || '') + ' ' + (n.className || '') + ' ' + (n.getAttribute('id') || '');
+          if (/item_result|search\??|keyword|global-search|top-search/.test(sig)) return true;
+        }
         n = n.parentElement;
       }
       return false;
     };
 
-    // 1) 常见 name / id 候选（在筛选条内者优先）
-    const direct = [
-      'input[name="shopName"]', 'input[name="shop_name"]',
-      'input[name="storeName"]', 'input[name="store_name"]',
-      'input[name="shop"]', 'input[id*="shop" i]', 'input[id*="store" i]'
-    ];
-    const directHits = direct
-      .map((s) => Array.from(document.querySelectorAll(s)))
-      .reduce((a, b) => a.concat(b), [])
-      .filter(isVisible)
-      .filter((el) => !isInTopSearch(el));
-    if (directHits.length) return directHits[0];
+    // ① 金标准：name="shopName"（从 URL 反推确认）。页面上可能有多处同名（顶部搜索栏也有店铺名框），需排除顶部那个
+    const allShopName = Array.from(document.querySelectorAll('input[name="shopName"]')).filter(isVisible);
+    const inFilter = allShopName.filter((el) => !inTopSearch(el));
+    if (inFilter.length) return inFilter[0];                                  // 筛选条内的 shopName
+    if (allShopName.length) return allShopName[allShopName.length - 1];      // 全被误判为顶部 → 兜底取 DOM 最后(通常在页面下方=筛选条)
 
-    // 2) placeholder 模糊「店铺」：筛选条里的，而非顶部搜索
+    // ② 兼容兜底：placeholder / 其他命名 / label 关联（仍排除顶部搜索栏）
     const phHits = Array.from(document.querySelectorAll('input[placeholder*="店铺" i], input[placeholder*="店名" i]'))
-      .filter(isVisible)
-      .filter((el) => !isInTopSearch(el));
+      .filter(isVisible).filter((el) => !inTopSearch(el));
     if (phHits.length) return phHits[0];
 
-    // 3) label 关联 input.labels / 邻近文本含「店铺」
     const allInputs = Array.from(document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])'))
-      .filter(isVisible)
-      .filter((el) => !isInTopSearch(el));
+      .filter(isVisible).filter((el) => !inTopSearch(el));
     for (const inp of allInputs) {
       if (inp.labels && inp.labels.length) {
-        for (const lb of inp.labels) {
-          if (lb.textContent && lb.textContent.indexOf('店铺') !== -1) return inp;
-        }
+        for (const lb of inp.labels) if (lb.textContent && lb.textContent.indexOf('店铺') !== -1) return inp;
       }
     }
-
-    // 4) input 紧邻文本含「店铺」：找紧邻兄弟节点 / 父节点里只含「店铺」文字的小节点
     for (const inp of allInputs) {
-      const prev = (inp.parentElement && inp.parentElement.textContent || '').replace(inp.value || '', '');
-      if (prev.indexOf('店铺') !== -1 && prev.length < 12) return inp; // 同胞/父里只有"店铺"两个字
+      const prev = ((inp.parentElement && inp.parentElement.textContent) || '').replace(inp.value || '', '');
+      if (prev.indexOf('店铺') !== -1 && prev.length < 12) return inp;
     }
-
-    // 5) 兜底：在筛选区(form[data-...] / .screen / .filter)里挑位置靠近中部的 input
     const inFilterArea = allInputs.filter((el) => {
       let n = el; while (n && n !== document.body) {
         if (n.matches && n.matches('form, .filter, .screening, [class*="filter" i], [class*="screen" i], [class*="condition" i]')) return true;
@@ -1015,6 +1009,28 @@
 
     return null;
   }
+
+  // v1.4.9: 调试函数——F12 Console 跑 __kfzDebugShopInputs() 打印所有候选店铺输入框的真实 DOM 信息（name/坐标/祖先/是否顶部）
+  window.__kfzDebugShopInputs = function () {
+    const all = Array.from(document.querySelectorAll(
+      'input[name="shopName"], input[placeholder*="店铺" i], input[placeholder*="店名" i], input[id*="shop" i], input[id*="store" i]'
+    ));
+    const out = all.map((el, i) => {
+      const r = el.getBoundingClientRect();
+      let anc = ''; let n = el.parentElement; let d = 0;
+      while (n && d < 4) {
+        anc += ' > ' + n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') +
+          (typeof n.className === 'string' && n.className ? '.' + n.className.trim().split(/\s+/).join('.') : '');
+        n = n.parentElement; d++;
+      }
+      let area = '-'; let m = el;
+      while (m && m !== document.body) { if (m.matches && m.matches('header,nav,.header,.nav,.top-bar,.search-bar,.site-header')) { area = 'TOP'; break; } m = m.parentElement; }
+      return '#' + i + ' name="' + el.name + '" ph="' + el.placeholder + '" rect=(' + Math.round(r.left) + ',' + Math.round(r.top) + ')' + Math.round(r.width) + 'x' + Math.round(r.height) + ' vis=' + (el.offsetParent !== null) + ' area=' + area + '\n    ' + anc;
+    });
+    const msg = '[kfz-debug] 候选店铺输入框(' + all.length + '个):\n' + out.join('\n');
+    try { console.log(msg); } catch (_) {}
+    return msg;
+  };
 
 // 全局点击拦截：点店名=复制到剪贴板+直接覆盖店铺 input.value(不 dispatch 事件→不发请求)
 // v1.4.8: 删除中/右键放行(用户不需要)；脚本结果区(.kfz-shop-name)与孔网原 a 都拦
