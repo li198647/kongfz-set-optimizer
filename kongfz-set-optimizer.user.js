@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.2
+// @version     1.4.3
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.2';
+  const SCRIPT_VERSION = '1.4.3';
 
   /* ============================================================
    * 工具函数
@@ -1133,8 +1133,10 @@
 
     $('#kfz-close', panel).onclick = () => {
       const b = $('#kfz-body', panel);
+      const r = $('#kfz-result-wrap', panel);
       const hidden = b.style.display === 'none';
       b.style.display = hidden ? 'block' : 'none';
+      r.style.display = hidden ? 'block' : 'none';  // v1.4.3: 收起时连同结果区一起折进去，只剩标题栏
       $('#kfz-close', panel).textContent = hidden ? '收起 ▾' : '展开 ▴';
       panel.classList.toggle('kfz-collapsed', !hidden); // 收起时加圆角，展开时去掉
     };
