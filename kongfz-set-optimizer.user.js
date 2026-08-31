@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.9
+// @version     1.4.10
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.9';
+  const SCRIPT_VERSION = '1.4.10';
 
   /* ============================================================
    * 工具函数
@@ -1010,8 +1010,10 @@
     return null;
   }
 
-  // v1.4.9: 调试函数——F12 Console 跑 __kfzDebugShopInputs() 打印所有候选店铺输入框的真实 DOM 信息（name/坐标/祖先/是否顶部）
-  window.__kfzDebugShopInputs = function () {
+  // v1.4.10: 调试函数——F12 Console 跑 __kfzDebugShopInputs() 打印所有候选店铺输入框的真实 DOM 信息（name/坐标/祖先/是否顶部）
+  // 关键坑：油猴在 @grant 下运行于「隔离沙箱」，window.xxx = 函数 这种属性赋值只写进沙箱副本，不会穿透到网页真实 window，
+  //        所以控制台里调用不到。必须把函数体以 <script> 注入页面真实上下文，才能从控制台访问。
+  function __kfzDebugShopInputs() {
     const all = Array.from(document.querySelectorAll(
       'input[name="shopName"], input[placeholder*="店铺" i], input[placeholder*="店名" i], input[id*="shop" i], input[id*="store" i]'
     ));
@@ -1030,7 +1032,16 @@
     const msg = '[kfz-debug] 候选店铺输入框(' + all.length + '个):\n' + out.join('\n');
     try { console.log(msg); } catch (_) {}
     return msg;
-  };
+  }
+  // 注入页面真实上下文：把函数体包成 <script> 追加进 DOM，在网页原生环境里挂到真实 window，控制台即可调用
+  try {
+    const s = document.createElement('script');
+    s.textContent = 'window.__kfzDebugShopInputs = ' + __kfzDebugShopInputs.toString() + ';';
+    (document.head || document.documentElement).appendChild(s);
+  } catch (e) {
+    // 极少数环境注入失败时的兜底：直接写 unsafeWindow（部分油猴版本是页面真实 window）
+    try { unsafeWindow.__kfzDebugShopInputs = __kfzDebugShopInputs; } catch (_) {}
+  }
 
 // 全局点击拦截：点店名=复制到剪贴板+直接覆盖店铺 input.value(不 dispatch 事件→不发请求)
 // v1.4.8: 删除中/右键放行(用户不需要)；脚本结果区(.kfz-shop-name)与孔网原 a 都拦
