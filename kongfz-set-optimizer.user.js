@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.4
+// @version     1.4.5
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.4';
+  const SCRIPT_VERSION = '1.4.5';
 
   /* ============================================================
    * 工具函数
@@ -965,6 +965,8 @@
       #kfz-panel.kfz-collapsed #kfz-head .compact-tag{display:inline-flex}
       #kfz-panel.kfz-collapsed #kfz-head #kfz-fill{display:none}
       #kfz-head .x{cursor:pointer;opacity:.85;font-weight:400}
+      #kfz-head #kfz-hide{font-size:15px;line-height:1;margin-right:4px;padding:1px 5px;border-radius:4px}
+      #kfz-head #kfz-hide:hover{background:rgba(255,255,255,.28);opacity:1}
       #kfz-head #kfz-fill{font-size:12px;padding:1px 6px;margin-right:6px;border:1px solid rgba(255,255,255,.65);border-radius:4px}
       #kfz-head #kfz-fill:hover{background:rgba(255,255,255,.2);opacity:1}
       #kfz-result-wrap{flex:0 0 auto;max-height:60vh;overflow:auto;border-bottom:1px solid #eee;background:#fffdf3}
@@ -1062,7 +1064,7 @@
     const savedExRules = loadExRules(String(savedSet || '').trim()).join('\n');
 
     panel.innerHTML = `
-      <div id="kfz-head"><span class="long">📚 孔网合集跨店凑单 v${SCRIPT_VERSION}</span><span class="compact-tag">📚 跨店凑单</span><span style="display:flex;align-items:center"><span class="x" id="kfz-fill" title="把孔夫子搜索栏已提交的关键字填入『整套书名』栏">⬇ 填字</span><span class="x" id="kfz-close">展开 ▴</span></span></div>
+      <div id="kfz-head"><span class="x" id="kfz-hide" title="关闭面板（刷新网页可重新打开）">×</span><span class="long">📚 孔网合集跨店凑单 v${SCRIPT_VERSION}</span><span class="compact-tag">📚 跨店凑单</span><span style="display:flex;align-items:center"><span class="x" id="kfz-fill" title="把孔夫子搜索栏已提交的关键字填入『整套书名』栏">⬇ 填字</span><span class="x" id="kfz-close">展开 ▴</span></span></div>
       <div id="kfz-result-wrap"><div id="kfz-result"></div></div>
       <div id="kfz-body" style="display:none">
         <label>整套书名 / 系列名</label>
@@ -1144,6 +1146,12 @@
       r.style.display = hidden ? 'block' : 'none';  // v1.4.3: 收起时连同结果区一起折进去，只剩标题栏
       $('#kfz-close', panel).textContent = hidden ? '收起 ▾' : '展开 ▴';
       panel.classList.toggle('kfz-collapsed', !hidden); // 收起时加圆角，展开时去掉
+    };
+
+    // v1.4.5: 标题栏最左侧「×」→ 彻底关闭整个面板（刷新网页即可重新打开）
+    $('#kfz-hide', panel).onclick = (e) => {
+      e.stopPropagation();           // 避免触发面板拖拽
+      panel.style.display = 'none';
     };
 
     // ===== 与孔夫子网站搜索框联动（自动跟随 + 手动填字） =====
