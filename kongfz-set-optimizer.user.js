@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.6
+// @version     1.4.7
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.6';
+  const SCRIPT_VERSION = '1.4.7';
 
   /* ============================================================
    * 工具函数
@@ -975,17 +975,17 @@
     return null;
   }
 
-  // 全局点击拦截：原搜索列表的店名 → 填入筛选条；中/右键放行；脚本 result 区店名放行
+  // 全局点击拦截：左键点店名=复制到剪贴板+直接覆盖店铺 input.value(不 dispatch 事件→不发请求)
+  // 中/右键放行（用户要看店详情）；脚本结果区的店名(.kfz-shop-name)与孔网原 a 都拦
   function installShopNameClickInterceptor(logf) {
     if (window.__kfzShopInterceptInstalled) return;
     window.__kfzShopInterceptInstalled = true;
 
-    // 探测 + 报告（延迟 1.5s 等页面 DOM 渲染完）
     const probe = () => {
       const inp = findShopFilterInput();
       if (inp) {
         const tag = inp.name ? ('name=' + inp.name) : (inp.id ? ('id=' + inp.id) : 'placeholder');
-        logf('🛒 店铺输入框已就绪（' + tag + '）。点搜索列表里的店名 = 填入此框。');
+        logf('🛒 店铺输入框已就绪（' + tag + '）。点任意位置的店名 = 复制 + 直接填入此框（不向孔网发请求）。');
       } else {
         logf('⚠ 未找到孔夫子筛选条「店铺」输入框（F12 请告诉我 input 的 name/id 或所在容器）');
       }
@@ -993,26 +993,40 @@
     setTimeout(probe, 1500);
     setTimeout(probe, 4000); // SPA 切换后再探一次
 
-    document.addEventListener('click', (e) => {
-      if (e.button !== 0) return;                         // 只拦左键
-      const a = e.target && e.target.closest && e.target.closest('a[href*="shop.kongfz.com/"]');
-      if (!a) return;
-      if (a.classList && a.classList.contains('kfz-shop-link')) return; // 脚本 result 区店名放行
-      if (a.target === '_blank') return;                 // 防御性：target=_blank 视为「要看店详情」，放行
-      e.preventDefault();
-      e.stopPropagation();
-      const shopName = (a.textContent || '').trim();
-      if (!shopName) return;
+    // 公共行为：复制→剪贴板 + 直接 input.value=name（不 dispatch→ 不触发孔网页面的 onchange 搜索）
+    const copyAndPasteShopName = async (name) => {
+      let copied = false, pasted = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(name);
+          copied = true;
+        }
+      } catch (_) { /* 权限被拒/非 https，复制会失败但仍可填入 */ }
       const input = findShopFilterInput();
-      if (!input) {
-        logf('⚠ 未找到「店铺」输入框，无法填入「' + shopName + '」');
+      if (input) { input.value = name; pasted = true; }
+      if (pasted)      logf('🛒 已' + (copied ? '复制并填入' : '填入') + '「店铺」筛选条：' + name);
+      else if (copied) logf('📋 已复制店名（未找到店铺输入框，请 Ctrl+V 到筛选条）：' + name);
+      else             logf('⚠ 复制失败（剪贴板权限被拒）。请手动 Ctrl+C 店名后到「店铺」筛选条粘贴：' + name);
+    };
+
+    document.addEventListener('click', (e) => {
+      if (e.button !== 0) return;                           // 只拦左键，中/右键放行
+      const t = e.target; if (!t || !t.closest) return;
+      const sp = t.closest('.kfz-shop-name');               // 1) 脚本 result 区纯文字店名
+      const a  = !sp && t.closest('a[href*="shop.kongfz.com/"]'); // 2) 孔网原搜索列表 a 链接
+      let name = null;
+      if (sp) {
+        name = (sp.dataset.shop || sp.textContent || '').trim();
+        if (!name) return;
+        e.preventDefault(); e.stopPropagation();
+      } else if (a) {
+        name = (a.textContent || '').trim();
+        if (!name) return;
+        e.preventDefault(); e.stopPropagation();
+      } else {
         return;
       }
-      input.value = shopName;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      input.focus();
-      logf('🛒 已填入店铺：' + shopName);
+      copyAndPasteShopName(name);
     }, true); // 捕获阶段先于孔夫子页面的 onclick
   }
 
@@ -1077,7 +1091,10 @@
         background:#c8161d;color:#fff;border:1px solid #c8161d;border-radius:4px;
         font-size:11px;font-weight:400;cursor:pointer;vertical-align:middle}
       #kfz-result .kfz-ex:hover{background:#a91016;color:#fff;border-color:#a91016}
-      /* 点击加入排除名单后的“已排除”状态：灰色、不可再点 */
+      /* v1.4.7: 脚本结果区店名：纯文字(非 a 标签)，点击=复制+填入选筛条 */
+      #kfz-result .kfz-shop-name{cursor:pointer;color:#c8161d;font-weight:600;text-decoration:none;display:inline-block;line-height:1.4}
+      #kfz-result .kfz-shop-name:hover{text-decoration:underline}
+      /* 点击加入排除名单后的"已排除"状态：灰色、不可再点 */
       #kfz-result .kfz-ex-done{background:#f6f6f6;color:#999;border-color:#e2e2e2;cursor:default}
       #kfz-result .kfz-ex-done:hover{background:#f6f6f6;color:#999;border-color:#e2e2e2}
       /* 底部折叠区：已排除条目 */
@@ -1289,8 +1306,8 @@
 
     syncFromUrl(); // 初始进入搜索结果页即自动填一次
 
-    // v1.4.6: 全局拦截孔夫子原搜索结果区的「店名」左键点击 → 改成填入筛选条「店铺」输入框。
-    //        不影响脚本凑单结果区里的店名（class=kfz-shop-link + target=_blank，仍可新开标签看店首页）。
+    // v1.4.7: 全局拦截左键店名点击=复制+直接覆盖「店铺」input.value(不发事件，不发请求)。
+    //        同一拦截器同时认: (1) 孔夫子原搜索列表的店名链接 (2) 脚本凑单结果区的店名 span(.kfz-shop-name)。
     //        中/右键放行，保留浏览器原生「在新标签页打开」能力。
     installShopNameClickInterceptor(logf);
 
@@ -1421,14 +1438,14 @@
             yuan(L.price) + exclBtn + '</div>';
         }).join('');
         html += '<tr>' +
-          '<td class="shop"><a class="kfz-shop-link" href="' + escapeAttr(p.shop.shopLink) + '" target="_blank" style="color:#c8161d">' + escapeHtml(p.shop.shopName) + '</a></td>' +
+          '<td class="shop"><span class="kfz-shop-name" data-shop="' + escapeAttr(p.shop.shopName) + '" title="点击→复制店名到剪贴板+直接填入筛选条「店铺」">' + escapeHtml(p.shop.shopName) + '</span></td>' +
           '<td>' + items + '</td>' +
           '<td>' + (p.shipping > 0 ? yuan(p.shipping) : '包邮') + '</td>' +
           '<td>' + yuan(p.subtotal) + '</td>' +
           '</tr>';
       });
       html += '</tbody></table>';
-      html += '<div class="kfz-tip">点击店名可进店核对；下单前请确认品相与库存。点“🚫排除”可让该条下次检索不再计入。' + (isDemo ? '（演示数据）' : '') + '</div>';
+      html += '<div class="kfz-tip">点击店名＝复制到剪贴板＋直接填入筛选条「店铺」（不会跳转也不会向孔网发请求）；点击 🚫排除 可让该条下次检索不再计入。' + (isDemo ? '（演示数据）' : '') + '</div>';
       return html;
     }
 
