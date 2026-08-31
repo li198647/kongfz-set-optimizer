@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.4.5
+// @version     1.4.6
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.4.5';
+  const SCRIPT_VERSION = '1.4.6';
 
   /* ============================================================
    * 工具函数
@@ -946,6 +946,77 @@
   }
 
   /* ============================================================
+   * v1.4.6: 孔夫子原搜索列表店名点击拦截 → 填入筛选条「店铺」输入框
+   * ============================================================ */
+  // 多启发式找孔夫子筛选条的「店铺」输入框
+  function findShopFilterInput() {
+    // 1) 常见 name / id 候选
+    const direct = [
+      'input[name="shopName"]', 'input[name="shop_name"]',
+      'input[name="storeName"]', 'input[name="store_name"]',
+      'input[name="shop"]', 'input[id*="shop" i]', 'input[id*="store" i]'
+    ];
+    for (const sel of direct) {
+      const el = document.querySelector(sel);
+      if (el && el.offsetParent !== null) return el;
+    }
+    // 2) placeholder 模糊
+    const ph = document.querySelector('input[placeholder*="店铺" i]');
+    if (ph && ph.offsetParent !== null) return ph;
+    // 3) label 关联：input.labels 含「店铺」文字
+    for (const inp of document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])')) {
+      if (inp.offsetParent === null) continue;
+      const labels = inp.labels;
+      if (!labels || !labels.length) continue;
+      for (const lb of labels) {
+        if (lb.textContent && lb.textContent.indexOf('店铺') !== -1) return inp;
+      }
+    }
+    return null;
+  }
+
+  // 全局点击拦截：原搜索列表的店名 → 填入筛选条；中/右键放行；脚本 result 区店名放行
+  function installShopNameClickInterceptor(logf) {
+    if (window.__kfzShopInterceptInstalled) return;
+    window.__kfzShopInterceptInstalled = true;
+
+    // 探测 + 报告（延迟 1.5s 等页面 DOM 渲染完）
+    const probe = () => {
+      const inp = findShopFilterInput();
+      if (inp) {
+        const tag = inp.name ? ('name=' + inp.name) : (inp.id ? ('id=' + inp.id) : 'placeholder');
+        logf('🛒 店铺输入框已就绪（' + tag + '）。点搜索列表里的店名 = 填入此框。');
+      } else {
+        logf('⚠ 未找到孔夫子筛选条「店铺」输入框（F12 请告诉我 input 的 name/id 或所在容器）');
+      }
+    };
+    setTimeout(probe, 1500);
+    setTimeout(probe, 4000); // SPA 切换后再探一次
+
+    document.addEventListener('click', (e) => {
+      if (e.button !== 0) return;                         // 只拦左键
+      const a = e.target && e.target.closest && e.target.closest('a[href*="shop.kongfz.com/"]');
+      if (!a) return;
+      if (a.classList && a.classList.contains('kfz-shop-link')) return; // 脚本 result 区店名放行
+      if (a.target === '_blank') return;                 // 防御性：target=_blank 视为「要看店详情」，放行
+      e.preventDefault();
+      e.stopPropagation();
+      const shopName = (a.textContent || '').trim();
+      if (!shopName) return;
+      const input = findShopFilterInput();
+      if (!input) {
+        logf('⚠ 未找到「店铺」输入框，无法填入「' + shopName + '」');
+        return;
+      }
+      input.value = shopName;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.focus();
+      logf('🛒 已填入店铺：' + shopName);
+    }, true); // 捕获阶段先于孔夫子页面的 onclick
+  }
+
+  /* ============================================================
    * 界面
    * ============================================================ */
   function buildPanel() {
@@ -1218,6 +1289,11 @@
 
     syncFromUrl(); // 初始进入搜索结果页即自动填一次
 
+    // v1.4.6: 全局拦截孔夫子原搜索结果区的「店名」左键点击 → 改成填入筛选条「店铺」输入框。
+    //        不影响脚本凑单结果区里的店名（class=kfz-shop-link + target=_blank，仍可新开标签看店首页）。
+    //        中/右键放行，保留浏览器原生「在新标签页打开」能力。
+    installShopNameClickInterceptor(logf);
+
     $('#kfz-gen', panel).onclick = () => {
       const name = setInput.value.trim();
       const cnt = parseInt(countInput.value, 10) || 8;
@@ -1345,7 +1421,7 @@
             yuan(L.price) + exclBtn + '</div>';
         }).join('');
         html += '<tr>' +
-          '<td class="shop"><a href="' + escapeAttr(p.shop.shopLink) + '" target="_blank" style="color:#c8161d">' + escapeHtml(p.shop.shopName) + '</a></td>' +
+          '<td class="shop"><a class="kfz-shop-link" href="' + escapeAttr(p.shop.shopLink) + '" target="_blank" style="color:#c8161d">' + escapeHtml(p.shop.shopName) + '</a></td>' +
           '<td>' + items + '</td>' +
           '<td>' + (p.shipping > 0 ? yuan(p.shipping) : '包邮') + '</td>' +
           '<td>' + yuan(p.subtotal) + '</td>' +
