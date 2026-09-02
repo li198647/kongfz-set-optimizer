@@ -13,11 +13,27 @@ function extractBlock(src, marker, openIdx) {
   }
   return src.slice(i, j);
 }
-const optCode = SRC.match(/async function optimize\(volumes, listings, opts\) \{[\s\S]*?\n  \}\n/)[0];
+// v1.5.1 起 optimize 依赖块内新增的辅助函数（稀疏 DP / 支配剪枝 / 跨方案缓存签名），
+//   只抽 optimize 单函数会 ReferenceError → 改为整块抽取 OPTIMIZER START..END + 块外依赖
+function grabFn(src, header) {
+  const i = src.indexOf(header);
+  if (i < 0) throw new Error("未找到: " + header);
+  let j = src.indexOf("{", i), d = 0;
+  for (; j < src.length; j++) { if (src[j] === "{") d++; else if (src[j] === "}") { d--; if (d === 0) { j++; break; } } }
+  return src.slice(i, j);
+}
+function grabLine(src, prefix) { const i = src.indexOf(prefix); return src.slice(i, src.indexOf("\n", i)); }
+const optCode = SRC.slice(SRC.indexOf("// === OPTIMIZER START ==="), SRC.indexOf("// === OPTIMIZER END ==="));
 const yldCode = SRC.match(/function yieldToBrowser\(\) \{[\s\S]*?\n  \}/) ? SRC.match(/function yieldToBrowser\(\) \{[\s\S]*?\n  \}/)[0] : "function yieldToBrowser() { return new Promise(r => setTimeout(r, 0)); }";
 const cfgCode = SRC.match(/const CONFIG = \{[\s\S]*?\};/)[0];
+const depsCode = [
+  grabLine(SRC, "const _nowMs ="),
+  grabLine(SRC, "const YIELD_CTL ="),
+  grabFn(SRC, "function resetYieldCtl()"),
+  grabFn(SRC, "async function maybeYield()"),
+].join("\n");
 const sandbox = [
-  cfgCode, yldCode, optCode,
+  cfgCode, yldCode, depsCode, optCode,
   "const STATE = { aborted: false, etaCtx: null };",
   "globalThis.__opt = optimize;",
 ].join("\n");

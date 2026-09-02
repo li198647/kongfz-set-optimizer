@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.5.0
+// @version     1.5.1
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都必须 +0.0.1（全局记忆“发版铁律”，最高优先级）
-  const SCRIPT_VERSION = '1.5.0';
+  const SCRIPT_VERSION = '1.5.1';
 
   /* ============================================================
    * 工具函数
@@ -102,6 +102,46 @@
       } catch (e) { /* MessageChannel 不可用 → 落到下面的 setTimeout 兜底 */ }
       setTimeout(resolve, 0);
     });
+  }
+
+  /* ============================================================
+   * v1.5.1: 自适应让位调度器 —— 修复"23 分钟里 98% 耗在 await 让位"的性能灾难
+   * ------------------------------------------------------------
+   * 实测（2026-09-01，21 册 / 224 家店，v1.5.0）：
+   *   全局 DP 共 2155 次 `await yieldToBrowser()`，合计等待 1,074,874ms（约 18 分钟），
+   *   **平均每次让位 499ms**；而 Node 跑同规模纯计算（完全不让位）只要约 15 秒。
+   *   ⇒ 瓶颈根本不是算法，是让位本身。代码注释里"MessageChannel 不受后台节流"的说法已被证伪：
+   *     标签页失焦/被遮挡，或 F12 开着（尤其开着控制台 + 大量 console.log），
+   *     一次 postMessage 往返可能被拖到几百毫秒。
+   * 对策：把"让位"当作**有成本的操作**来做预算控制，而不是无条件每 50ms 让一次：
+   *   ① 实测每次让位的真实耗时（EMA 平滑）；
+   *   ② 让位预算 budget = clamp(cost × 20, 50, 5000)ms
+   *      —— 让位便宜（<1ms，正常前台）时 budget 维持 50ms，UI 依旧每秒响应 20 次；
+   *      —— 让位昂贵（500ms，被节流）时 budget 自动跳到数秒，退化为"每几秒让一次"，
+   *         让位总开销被压到总耗时的 5% 左右（原来占 98%）。
+   *   ③ 预算只增不减（单次 optimize 内单调），避免抖动；
+   *   ④ **中止检查与让位解耦**：裸读 STATE.aborted 保持高频（每 65536 次），
+   *      按"终止计算"依旧是毫秒级响应，不受让位变稀疏影响。
+   * 5 秒上限是刻意留的：保证最坏情况下 UI 每 5 秒仍能响应一次，不会触发"页面无响应"。
+   * ============================================================ */
+  const _nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const YIELD_CTL = { cost: 0, budget: 50, last: 0, yields: 0, waitMs: 0 };
+  function resetYieldCtl() {
+    YIELD_CTL.cost = 0; YIELD_CTL.budget = 50; YIELD_CTL.last = _nowMs();
+    YIELD_CTL.yields = 0; YIELD_CTL.waitMs = 0;
+  }
+  // 距上次让位超过预算才真正让位；返回 true 表示本次确实让位了
+  async function maybeYield() {
+    const now = _nowMs();
+    if (now - YIELD_CTL.last < YIELD_CTL.budget) return false;
+    await yieldToBrowser();
+    const dt = _nowMs() - now;
+    YIELD_CTL.yields++; YIELD_CTL.waitMs += dt;
+    YIELD_CTL.cost = YIELD_CTL.cost ? (YIELD_CTL.cost * 0.7 + dt * 0.3) : dt;
+    const nb = Math.max(50, Math.min(5000, YIELD_CTL.cost * 20));
+    if (nb > YIELD_CTL.budget) YIELD_CTL.budget = nb;
+    YIELD_CTL.last = _nowMs();
+    return true;
   }
 
   function gmFetch(url, headers) {
@@ -657,6 +697,195 @@
   //   3) 改为 async function，在店铺内 listings 循环、configMap 构建、全局 DP 主循环中按需 yieldToBrowser，让位主线程；
   //   4) 加 CONFIG.debug 进度日志（入口 / 单店 DP 完成 / 全局 DP mask 进度 / 全局 DP 完成总耗时）。
   //   复杂度降阶：单店从 O(items²·2ⁿ) → O(items·2ⁿ)；全局从 O(shops·2²ⁿ·configs) → 同阶但配合 yield 不再冻死浏览器。
+  //
+  // v1.5.1 性能大改（针对 21 册实测 23 分钟，目标 20~30 秒），共 4 项，全部是**精确**优化（最优解不变）：
+  //   ① 自适应让位（见 YIELD_CTL / maybeYield）：把 98% 的无效等待砍掉，单项 20~50x；
+  //   ② 稀疏店内 DP（buildShopConfigsSparse）：状态空间 2^ln 过大时改用可达状态稀疏表；
+  //   ③ config 支配剪枝（pruneConfigs）：删掉"覆盖更少还更贵"的配置，缩小全局 DP 内层循环；
+  //   ④ 跨方案缓存（_shopCfgCache）：第2/3方案复用第1方案的店内 DP 结果。
+
+  /* ------------------------------------------------------------
+   * ② 稀疏版店内 DP（v1.5.1）
+   * 背景：dense 版按"本店涉及册数 ln"开 2^ln 维数组。孔网实测有大量
+   *       "本店只挂 1 件、但这件横跨全部 21 册"的店 —— ln=21 → 2^21 = 209 万个状态，
+   *       其中**只有 1 个可达**。v1.5.0 日志里 13 家这样的店（localN=21 & items=1）
+   *       各为 209 万个空状态分配 6 个 typed array（≈64MB）、空转两轮 209 万次循环，
+   *       外加 configMap 循环里 32 次让位，各耗 6.5~13.2 秒，合计约 130 秒全是浪费。
+   * 改法：状态数上界从 2^ln 降为 min(2^items, 2^ln)，只存**可达**状态（列式数组 + Map 索引）。
+   *       ln ≤ 14 仍走原来的 dense typed array 快路径（此时状态基本会被填满，dense 更快）。
+   * 语义：与 dense 版逐位等价（同样的 af/nf 双状态 0/1 DP，同样一店只收一次运费）。
+   * ------------------------------------------------------------ */
+  async function buildShopConfigsSparse(items, localMask, localVols, shopShip) {
+    // 列式存储：lmArr[k] = 第 k 个可达状态的局部 mask；下标 0 恒为初始空集
+    const lmArr = [0];
+    const aArr = [0];            // af[k]：包邮已达成下的最优价
+    const nArr = [Infinity];     // nf[k]：未包邮（已计入一次运费）下的最优价
+    const aPArr = [-1], aIArr = [-1];              // af 前驱状态下标 / 本步使用的 listing 下标
+    const nPArr = [-1], nIArr = [-1], nFAArr = [0]; // nf 前驱 / listing / 是否由 af 转入（=已收运费）
+    const idxOf = new Map([[0, 0]]);
+
+    const ensure = (nm) => {
+      let k = idxOf.get(nm);
+      if (k === undefined) {
+        k = lmArr.length;
+        idxOf.set(nm, k);
+        lmArr.push(nm); aArr.push(Infinity); nArr.push(Infinity);
+        aPArr.push(-1); aIArr.push(-1); nPArr.push(-1); nIArr.push(-1); nFAArr.push(0);
+      }
+      return k;
+    };
+
+    for (let i = 0; i < items.length; i++) {
+      const lm = localMask[i], p = items[i].price;
+      // 快照 cnt：本轮新产生的状态不参与本轮转移 —— 保证每条 listing 至多用一次（0/1 语义）
+      const cnt = lmArr.length;
+      if (items[i].free) {
+        for (let k = 0; k < cnt; k++) {
+          const a = aArr[k];
+          if (a !== Infinity) {
+            const ni = ensure(lmArr[k] | lm), c = a + p;
+            if (c < aArr[ni]) { aArr[ni] = c; aPArr[ni] = k; aIArr[ni] = i; }
+          }
+          const nn = nArr[k];
+          if (nn !== Infinity) {
+            const ni = ensure(lmArr[k] | lm), c = nn + p;
+            if (c < nArr[ni]) { nArr[ni] = c; nPArr[ni] = k; nIArr[ni] = i; nFAArr[ni] = 0; }
+          }
+        }
+      } else {
+        for (let k = 0; k < cnt; k++) {
+          const a = aArr[k];
+          if (a !== Infinity) {
+            const ni = ensure(lmArr[k] | lm), c = a + p + shopShip;
+            if (c < nArr[ni]) { nArr[ni] = c; nPArr[ni] = k; nIArr[ni] = i; nFAArr[ni] = 1; }
+          }
+          const nn = nArr[k];
+          if (nn !== Infinity) {
+            const ni = ensure(lmArr[k] | lm), c = nn + p;
+            if (c < nArr[ni]) { nArr[ni] = c; nPArr[ni] = k; nIArr[ni] = i; nFAArr[ni] = 0; }
+          }
+        }
+      }
+      // 中止检查保持高频（每 64 条 listing）；让位交给 maybeYield 按自适应预算决定
+      if ((i & 0x3F) === 0x3F) {
+        if (STATE.aborted) throw new Error('用户终止了计算');
+        await maybeYield();
+      }
+    }
+
+    const backtrack = (which, k) => {
+      const out = [];
+      let cur = k, w = which;
+      while (cur > 0) {                       // 下标 0 = 初始空集，回溯到它即结束
+        const P = w === 'af' ? aPArr : nPArr;
+        const I = w === 'af' ? aIArr : nIArr;
+        const pk = P[cur], ii = I[cur];
+        if (pk < 0 || ii < 0) break;
+        out.push(items[ii]);
+        if (w === 'nf' && nFAArr[cur] === 1) w = 'af';
+        cur = pk;
+      }
+      return out.reverse();
+    };
+
+    const configMap = new Map();
+    for (let k = 1; k < lmArr.length; k++) {
+      let cost, which;
+      if (aArr[k] <= nArr[k]) { if (aArr[k] < Infinity) { cost = aArr[k]; which = 'af'; } else continue; }
+      else { if (nArr[k] < Infinity) { cost = nArr[k]; which = 'nf'; } else continue; }
+      // 局部 mask → 全局 mask
+      let gm = 0, m = lmArr[k], pos = 0;
+      while (m) { if (m & 1) gm |= (1 << localVols[pos]); m >>= 1; pos++; }
+      configMap.set(gm, { cost, picks: backtrack(which, k) });
+    }
+    return configMap;
+  }
+
+  /* ------------------------------------------------------------
+   * ③ config 支配剪枝（v1.5.1）
+   * 定理：同一家店内，若配置 j 覆盖的卷集合 ⊇ 配置 i 的卷集合，且 cost_j ≤ cost_i，
+   *       则任何用到 i 的解把 i 换成 j 后：覆盖集合只增不减、总价不增 —— 仍是可行解且不更差。
+   *       ⇒ i 永远不可能出现在**唯一**最优解里，可安全删除（**精确剪枝，最优值不变**）。
+   * 收益：全局 DP 内层循环长度 = 该店 configs 数，剪掉一半就省一半。
+   * 实现：小集合 O(C²) 两两比较；大集合用 SOS DP（超集最小值，O(ln·2^ln)，ln≤14 上限 23 万次）。
+   * ------------------------------------------------------------ */
+  function pruneConfigs(cfgArr, ln, gToL) {
+    const C = cfgArr.length;
+    if (C <= 1) return cfgArr;
+    // 保护：稀疏路径下 ln 可能很大（如 21），此时 SOS 的 2^ln 空间开销远超剪枝收益 → 直接放弃剪枝
+    if (C > 300 && ln > 14) return cfgArr;
+    const keep = new Uint8Array(C).fill(1);
+    let kept = 0;
+
+    if (C <= 300) {
+      for (let i = 0; i < C; i++) {
+        const si = cfgArr[i].sm, ci = cfgArr[i].cost;
+        for (let j = 0; j < C; j++) {
+          if (i === j || !keep[j]) continue;
+          if ((si & ~cfgArr[j].sm) === 0 && cfgArr[j].cost <= ci) { keep[i] = 0; break; }
+        }
+      }
+    } else {
+      const SZ = 1 << ln;
+      const best = new Float64Array(SZ); best.fill(Infinity);
+      const at = new Int32Array(SZ).fill(-1);
+      const lmOf = new Int32Array(C);
+      for (let i = 0; i < C; i++) {
+        let gm = cfgArr[i].sm, lm = 0;
+        while (gm) { const bit = gm & -gm; lm |= (1 << gToL[31 - Math.clz32(bit)]); gm &= gm - 1; }
+        lmOf[i] = lm;
+        if (cfgArr[i].cost < best[lm]) { best[lm] = cfgArr[i].cost; at[lm] = i; }
+      }
+      // SOS DP：best[m] = min{ cost[m'] | m' ⊇ m }，at[m] = 取到该最小值的 m'
+      for (let b = 0; b < ln; b++) {
+        const bit = 1 << b;
+        for (let m = 0; m < SZ; m++) {
+          if ((m & bit) === 0) {
+            const o = m | bit;
+            if (best[o] < best[m]) { best[m] = best[o]; at[m] = at[o]; }
+          }
+        }
+      }
+      for (let i = 0; i < C; i++) {
+        const lm = lmOf[i], b = best[lm];
+        if (b < cfgArr[i].cost) keep[i] = 0;                              // 存在严格更便宜的超集
+        else if (at[lm] !== i && b <= cfgArr[i].cost) keep[i] = 0;        // 同价但存在严格超集达到
+      }
+    }
+
+    for (let i = 0; i < C; i++) if (keep[i]) kept++;
+    if (kept === C) return cfgArr;
+    const out = new Array(kept);
+    let w = 0;
+    for (let i = 0; i < C; i++) if (keep[i]) out[w++] = cfgArr[i];
+    return out;
+  }
+
+  /* ------------------------------------------------------------
+   * ④ 跨方案缓存（v1.5.1）
+   * 背景：第2/3方案只是"剔除前几方案用过的店铺"，绝大多数店的 listings 与上轮**完全相同**，
+   *       但 v1.5.0 每次都重算全部店内 DP（日志：'士贤书店'在两个方案里各跑约 6 秒）。
+   * 做法：按 (卷数 n, 店铺 id, 该店 listings 内容签名) 缓存 configMap，第2/3方案直接复用。
+   * 签名含每条 listing 的 卷掩码/价格/包邮/运费，排序后哈希 —— 内容变了签名必变，不会用错。
+   * ------------------------------------------------------------ */
+  const _shopCfgCache = new Map();
+  function shopCfgSignature(n, shopId, items) {
+    const parts = new Array(items.length);
+    for (let i = 0; i < items.length; i++) {
+      const L = items[i];
+      parts[i] = L.volMask + ':' + L.price + ':' + (L.free ? 1 : 0) + ':' + (L.shipping || 0);
+    }
+    parts.sort();                                  // 顺序无关
+    const s = n + '|' + shopId + '|' + parts.join(',');
+    let h = 2166136261;                            // FNV-1a 32bit
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 16777619) >>> 0; }
+    return s.length + '#' + h;
+  }
+  function resetOptimizerCache() {
+    _shopCfgCache.clear();
+    resetYieldCtl();
+  }
+
   async function optimize(volumes, listings, opts) {
     opts = opts || {};
     const n = volumes.length;
@@ -708,18 +937,30 @@
       }
       if (!hasNonFree) shopShip = 0;
 
-      // 局部维 typed array（维数 LN1，通常极小：本店册数 3 → 2^3=8 状态）
-      const af = new Float64Array(LN1);
-      const nf = new Float64Array(LN1);
-      for (let k = 0; k < LN1; k++) { af[k] = Infinity; nf[k] = Infinity; }
-      af[0] = 0;
+      // v1.5.1 ②：ln>14（2^ln > 16384）时改用稀疏 DP。dense 会为海量空状态分配几十 MB 并空转，
+      //   典型受害者：本店只挂 1 件却横跨 21 册（ln=21 → 209 万个状态里只有 1 个可达）。
+      const DENSE = LN1 <= 16384;
 
-      const afPrev = new Int32Array(LN1);
-      const afIdx  = new Int32Array(LN1);
-      const nfPrev = new Int32Array(LN1);
-      const nfIdx  = new Int32Array(LN1);
-      const nfFromAf = new Uint8Array(LN1);
-      afPrev.fill(-1); afIdx.fill(-1); nfPrev.fill(-1); nfIdx.fill(-1);
+      // v1.5.1 ④：跨方案缓存 —— 第2/3方案的绝大多数店与上轮 listings 完全相同，直接复用 configMap
+      const _sig = shopCfgSignature(n, s.shopId, s.listings);
+      let configMap = _shopCfgCache.get(_sig);
+      const _cached = !!configMap;
+
+      // 局部维 typed array（维数 LN1，通常极小：本店册数 3 → 2^3=8 状态）—— 仅 dense 路径需要
+      let af, nf, afPrev, afIdx, nfPrev, nfIdx, nfFromAf;
+      if (DENSE && !_cached) {
+        af = new Float64Array(LN1);
+        nf = new Float64Array(LN1);
+        for (let k = 0; k < LN1; k++) { af[k] = Infinity; nf[k] = Infinity; }
+        af[0] = 0;
+
+        afPrev = new Int32Array(LN1);
+        afIdx  = new Int32Array(LN1);
+        nfPrev = new Int32Array(LN1);
+        nfIdx  = new Int32Array(LN1);
+        nfFromAf = new Uint8Array(LN1);
+        afPrev.fill(-1); afIdx.fill(-1); nfPrev.fill(-1); nfIdx.fill(-1);
+      }
 
       const items = s.listings;
       // 预计算每个 listing 的局部 mask（把全局 volMask 投影到局部位）
@@ -737,6 +978,14 @@
 
       const shopStart = CONFIG.debug ? _t() : 0;
 
+      if (_cached) {
+        // 命中缓存：整段店内 DP 跳过（v1.5.1 ④）
+      } else if (!DENSE) {
+        // v1.5.1 ②：稀疏路径（可达状态上界 min(2^items, 2^ln)）
+        configMap = await buildShopConfigsSparse(items, localMask, localVols, shopShip);
+        if (_shopCfgCache.size > 2000) _shopCfgCache.clear();
+        _shopCfgCache.set(_sig, configMap);
+      } else {
       for (let i = 0; i < items.length; i++) {
         const lm = localMask[i], p = items[i].price;
         if (items[i].free) {
@@ -764,7 +1013,7 @@
         }
         if (bigN && (i & 0xF) === 0xF) {
           if (STATE.aborted) throw new Error('用户终止了计算');   // v1.3.1: 本店内部 DP 每 16 条即查中止
-          await yieldToBrowser();
+          await maybeYield();   // v1.5.1: 自适应让位（原为无条件 yield，被节流时单家店就白等好几秒）
         }
       }
 
@@ -791,24 +1040,28 @@
         return gm;
       };
 
-      const configMap = new Map();
+      configMap = new Map();
       for (let mask = 1; mask < LN1; mask++) {
         let cost, which;
         if (af[mask] <= nf[mask]) { if (af[mask] < Infinity) { cost = af[mask]; which = 'af'; } else continue; }
         else { if (nf[mask] < Infinity) { cost = nf[mask]; which = 'nf'; } else continue; }
         configMap.set(localToGlobal(mask), { cost, picks: backtrack(which, mask) });
-        // LN1 通常极小，无需让位；仅超大规模单店（LN1>65536）才 yield
-        if (bigN && LN1 > 65536 && (mask & 0xFFFF) === 0xFFFF) {
-          if (STATE.aborted) throw new Error('用户终止了计算');   // v1.3.1: 本店 configMap DP 中途可中止
-          await yieldToBrowser();
+        // 中止检查保持高频；让位交给 maybeYield 按预算决定（v1.5.1：不再无条件每 65536 个 mask 让一次）
+        if (bigN && (mask & 0xFFFF) === 0xFFFF) {
+          if (STATE.aborted) throw new Error('用户终止了计算');
+          await maybeYield();
         }
       }
+      if (_shopCfgCache.size > 2000) _shopCfgCache.clear();
+      _shopCfgCache.set(_sig, configMap);
+      }  // ← 结束 dense 分支（稀疏/缓存命中时上面两段整段跳过）
 
       if (CONFIG.debug) {
         console.log('[kfz] opt shop="' + (s.shopName || '').slice(0, 12) + '" items=' + items.length +
-          ' localN=' + ln + ' configs=' + configMap.size + ' dt=' + (_t() - shopStart).toFixed(0) + 'ms');
+          ' localN=' + ln + ' configs=' + configMap.size +
+          (_cached ? ' [缓存命中]' : (!DENSE ? ' [稀疏]' : '')) + ' dt=' + (_t() - shopStart).toFixed(0) + 'ms');
       }
-      shopConfigs.push({ shop: s, configs: configMap, shopShip });
+      shopConfigs.push({ shop: s, configs: configMap, shopShip, gToL, ln });
     }
 
     // 3) 0/1 背包式 DP（每个店铺至多使用一次），状态 = 已覆盖的卷集合
@@ -825,24 +1078,31 @@
       // v1.3.1: 每店 loop 顶先查 aborted（不在此 yield，避免 N×4ms 性能累加退步），确保按"终止计算"后即刻停止
       if (STATE.aborted) throw new Error('用户终止了计算');
       shopIdx++;
+      // v1.5.1: nd 必须保留（本店不能重复使用自己，转移要基于"本店处理前"的 dp）；
+      //   而 parent / choice 改为**原地更新**——它们在本店循环里只写不读，
+      //   原代码每店都做 `Int32Array.from(parent)` + `Array.from(choice)` 两份 209 万元素拷贝
+      //   （8MB×2×224 店 ≈ 3.6GB 内存搬运 + 200 万个对象引用的 GC 压力），纯属浪费。
       const nd = Float64Array.from(dp);
-      const nparent = Int32Array.from(parent);
-      // v1.1.17-FIX: nchoice 必须从上一轮 choice 继承！直接 fill(null) 会丢 nchoice[FULL] → 回溯 0 居店。
-      const nchoice = Array.from(choice);
       // 预计算每个配置的全局 mask 与 base 价（去掉内层上亿次 reduce 调用）
-      const cfgArr = [];
+      let cfgArr = [];
       for (const [sm, cfg] of sc.configs.entries()) {
         let base = 0;
         for (const p of cfg.picks) base += p.price;
         cfgArr.push({ sm, cost: cfg.cost, picks: cfg.picks, base });
       }
-      if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + '/' + shopConfigs.length + ' configs=' + cfgArr.length);
+      // v1.5.1 ③：支配剪枝 —— 删掉"覆盖更少还更贵"的配置（精确剪枝，最优解不变）
+      const cfgRaw = cfgArr.length;
+      cfgArr = pruneConfigs(cfgArr, sc.ln, sc.gToL);
+      if (CONFIG.debug) {
+        console.log('[kfz] opt global shop ' + shopIdx + '/' + shopConfigs.length +
+          ' configs=' + cfgArr.length + (cfgRaw !== cfgArr.length ? ' (剪枝前 ' + cfgRaw + ')' : ''));
+      }
 
       inChg.fill(0);
       const changed = [];
       let updates = 0;
-      let lastYield = _t();
       let chk = 0;
+      let dbgN = 0;   // v1.5.1: debug 日志降频（原来每次让位都打一行，21 册时上千行拖慢控制台）
       // 密集顺序遍历全部 2^n 状态：V8 对定长顺序循环优化极好，比显式 active 列表（破坏缓存局部性）更快
       for (let mask = 0; mask < N1; mask++) {
         const dpM = dp[mask];
@@ -853,31 +1113,32 @@
           const cand = dpM + e.cost;
           if (cand < nd[nmask]) {
             nd[nmask] = cand;
-            nparent[nmask] = mask;
-            nchoice[nmask] = { shop: sc.shop, picks: e.picks, ship: e.cost - e.base };
+            parent[nmask] = mask;                                                  // v1.5.1: 原地写，不再拷贝一份
+            choice[nmask] = { shop: sc.shop, picks: e.picks, ship: e.cost - e.base };
             updates++;
             if (!inChg[nmask]) { inChg[nmask] = 1; changed.push(nmask); }
           }
         }
-        // 全局 DP 让位 + 中止检查：每 65536 次裸读 STATE.aborted（~0.5-1ms 即响应，开销可忽略），命中即抛错；
-        // 真 yield 仍按 >50ms 时间预算触发（避免热循环里无谓 yield，保持 v1.1.18 性能铁律）
+        // 全局 DP 让位 + 中止检查：每 65536 次裸读 STATE.aborted（~0.5-1ms 即响应，开销可忽略），命中即抛错。
+        // v1.5.1: 真 yield 交给 maybeYield 按自适应预算决定（原来固定 50ms 一次 → 实测每次 499ms，占了 98% 的耗时）
         if (bigN && (++chk & 0xFFFF) === 0) {
           if (STATE.aborted) throw new Error('用户终止了计算');
-          if (_t() - lastYield > 50) {
-            lastYield = _t();
-            if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + ' mask=' + mask + '/' + N1 + ' updates=' + updates);
-            await yieldToBrowser();
+          if (await maybeYield() && CONFIG.debug && dbgN < 3) {
+            dbgN++;
+            console.log('[kfz] opt global shop ' + shopIdx + ' mask=' + mask + '/' + N1 + ' updates=' + updates);
           }
         }
       }
-      // 只提交被本店改变的 mask（避免每店全量 2^n 写回）
-      for (let i = 0; i < changed.length; i++) { const m = changed[i]; dp[m] = nd[m]; parent[m] = nparent[m]; choice[m] = nchoice[m]; }
+      // 只提交被本店改变的 mask（避免每店全量 2^n 写回）；parent/choice 已原地更新，不必再回写
+      for (let i = 0; i < changed.length; i++) { const m = changed[i]; dp[m] = nd[m]; }
       if (CONFIG.debug) console.log('[kfz] opt global shop ' + shopIdx + ' DONE changed=' + changed.length + ' updates=' + updates);
-      if (bigN) await yieldToBrowser();
+      if (bigN) await maybeYield();
     }
 
     if (CONFIG.debug) {
-      console.log('[kfz] opt global DONE dt=' + (_t() - t0).toFixed(0) + 'ms shops=' + shopConfigs.length);
+      console.log('[kfz] opt global DONE dt=' + (_t() - t0).toFixed(0) + 'ms shops=' + shopConfigs.length +
+        ' | 让位 ' + YIELD_CTL.yields + ' 次 / 共等 ' + YIELD_CTL.waitMs.toFixed(0) + 'ms' +
+        '（自适应预算 ' + YIELD_CTL.budget.toFixed(0) + 'ms，单次实测 ' + YIELD_CTL.cost.toFixed(1) + 'ms）');
     }
 
     if (dp[FULL] === Infinity) {
@@ -1623,6 +1884,9 @@ function installShopNameClickInterceptor(logf) {
     };
 
     // —— 1) 先算第1方案 ——
+    // v1.5.1: 新一轮计算前清空"店内 DP 跨方案缓存"并重置自适应让位预算
+    //   （缓存只在同一轮的第1/2/3方案之间复用；换书名/换册数必须失效，否则结果会错）
+    resetOptimizerCache();
     logf('🧮 计算第1方案…');
     const r0 = await optimize(volumes, leftover, {});
     plans[0] = r0;
