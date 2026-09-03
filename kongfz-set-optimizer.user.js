@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.6.0
+// @version     1.6.1
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都 bump 版本号（加新功能→MINOR，修bug→PATCH），见全局记忆"发版铁律"
-  const SCRIPT_VERSION = '1.6.0';
+  const SCRIPT_VERSION = '1.6.1';
 
   /* ============================================================
    * 工具函数
@@ -1097,6 +1097,8 @@
         console.log('[kfz] opt global shop ' + shopIdx + '/' + shopConfigs.length +
           ' configs=' + cfgArr.length + (cfgRaw !== cfgArr.length ? ' (剪枝前 ' + cfgRaw + ')' : ''));
       }
+      // v1.6.1: 同步面板进度（紧跟在"计算第N方案…"后面实时显示，让用户看见还剩多少，不以为卡死）
+      if (STATE.setProgress) STATE.setProgress('📊 进度 ' + (shopIdx + 1) + '/' + shopConfigs.length + '（当前店 ' + cfgArr.length + ' 个配置）');
 
       inChg.fill(0);
       const changed = [];
@@ -1140,6 +1142,8 @@
         ' | 让位 ' + YIELD_CTL.yields + ' 次 / 共等 ' + YIELD_CTL.waitMs.toFixed(0) + 'ms' +
         '（自适应预算 ' + YIELD_CTL.budget.toFixed(0) + 'ms，单次实测 ' + YIELD_CTL.cost.toFixed(1) + 'ms）');
     }
+    // v1.6.1: 面板进度完成提示（绿色 + 加粗样式）
+    if (STATE.setProgress) STATE.setProgress('✓ 计算完成 ' + shopConfigs.length + '/' + shopConfigs.length + '（用时 ' + ((_t() - t0) / 1000).toFixed(1) + 's）', true);
 
     if (dp[FULL] === Infinity) {
       // 找出未被任何店铺覆盖的卷
@@ -1457,6 +1461,9 @@ function installShopNameClickInterceptor(logf) {
       #kfz-panel button.warn.stopping{background:#ff8c00;color:#fff;border-color:#ff8c00}  /* v1.3.2: 按下后置“终止中”高亮态，告知用户已生效 */
       #kfz-panel button:hover{opacity:.9}
       #kfz-log{margin-top:8px;max-height:120px;overflow:auto;background:#fafafa;border:1px solid #eee;border-radius:6px;padding:6px 8px;font-size:12px;color:#444;white-space:pre-wrap}
+      /* v1.6.1: 实时进度行（紧跟在"计算第N方案…"后面，实时显示还剩多少店，避免用户以为页面卡死） */
+      #kfz-log .kfz-progress{margin-top:4px;padding-top:4px;border-top:1px dashed #ddd;color:#888;font-size:11px;font-family:ui-monospace,Consolas,monospace;letter-spacing:0.3px;white-space:pre-wrap}
+      #kfz-log .kfz-progress.done{color:#0a7c0a;font-weight:700;border-top-color:#0a7c0a}
       #kfz-result{margin:0}                       /* 顶部留白由 wrap 提供 */
       #kfz-result .total{font-size:16px;font-weight:700;color:#c8161d;margin:8px 12px 4px}
       #kfz-result table{width:100%;border-collapse:collapse;font-size:12px}
@@ -1577,8 +1584,46 @@ function installShopNameClickInterceptor(logf) {
     const exRulesInput = $('#kfz-exrules', panel);
     const condInput = $('#kfz-cond', panel);   // v1.2.2: 出版社/年份筛选条件输入框
 
-    const logf = (msg) => { log.textContent += msg + '\n'; log.scrollTop = log.scrollHeight; };
-    const resetOut = () => { result.innerHTML = ''; log.textContent = ''; };
+    // v1.6.1: logf 改用 appendChild 模式（而非 textContent +=），保留 log 容器内的子节点（如 progressLine）
+    //   原因：要支持"实时进度行"作为 log 容器的持久子节点,每次 setProgress 直接改 textContent 即可。
+    //   副作用：原 textContent += '\n' 的视觉换行靠 <br> 元素实现（CSS white-space:pre-wrap 兼容）。
+    //   关键：每次 logf 末尾都把 progressLine 重新 appendChild 到 log 末尾,
+    //         确保它"紧跟在最新追加的文本后面",而非被后续追加挤到前面(否则用户会看到进度在最上,不是最下)。
+    //   顺序注意：progressLine 必须先于 _moveProgressToEnd 声明,否则触发 TDZ ReferenceError。
+    const progressLine = document.createElement('div');
+    progressLine.id = 'kfz-progress';
+    progressLine.className = 'kfz-progress';
+    progressLine.style.display = 'none';
+    log.appendChild(progressLine);
+    const _moveProgressToEnd = () => {
+      // appendChild 已存在的节点会自动移动到末尾(DOM 规范行为)
+      if (progressLine.parentNode === log) log.appendChild(progressLine);
+    };
+    const logf = (msg) => {
+      log.appendChild(document.createTextNode(msg));
+      log.appendChild(document.createElement('br'));
+      _moveProgressToEnd();
+      log.scrollTop = log.scrollHeight;
+    };
+    // v1.6.1: 实时进度行 div（紧跟 log 容器内最新追加的文本，实时更新显示还剩多少店，避免误以为页面卡死）。
+    //   调用方：optimize() 里的全局 DP 循环（通过 STATE.setProgress 暴露），
+    //   用户体验：以前只能开 F12 看 164/169,现在面板里就能看见,知道还剩多少,不会误以为页面卡死。
+    const setProgress = (text, isDone) => {
+      progressLine.textContent = text;
+      progressLine.className = 'kfz-progress' + (isDone ? ' done' : '');
+      progressLine.style.display = text ? '' : 'none';
+      log.scrollTop = log.scrollHeight;
+    };
+    STATE.setProgress = setProgress;   // 暴露给 optimize() 用（外层作用域无法直接访问这里的闭包变量）
+    const resetOut = () => {
+      result.innerHTML = '';
+      // v1.6.1: log.textContent = '' 会清掉所有子节点（含 progressLine），所以这里重建一下
+      log.textContent = '';
+      progressLine.textContent = '';
+      progressLine.className = 'kfz-progress';
+      progressLine.style.display = 'none';
+      log.appendChild(progressLine);
+    };
 
     // ===== 标题排除关键词 / 出版社年份条件：书名变化即恢复默认说明状态 =====
     // “整套书名”框内容一旦改变，就把“出版社/年份筛选”和“标题排除关键词”两个条件框
