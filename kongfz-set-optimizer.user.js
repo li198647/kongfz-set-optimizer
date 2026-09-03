@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         孔网合集跨店最低价凑单助手
 // @namespace    https://workbuddy.cn
-// @version     1.6.1
+// @version     1.7.0
 // @description 浏览孔夫子旧书网某套合集时，自动跨店检索各单册价格与运费，计算出能凑齐整套的最低总价跨店组合方案。
 // @author      WorkBuddy
 // @match       https://*.kongfz.com/*
@@ -52,7 +52,7 @@
   let STATE = { base: '', aborted: false };
 
   // 版本号：每次改动都 bump 版本号（加新功能→MINOR，修bug→PATCH），见全局记忆"发版铁律"
-  const SCRIPT_VERSION = '1.6.1';
+  const SCRIPT_VERSION = '1.7.0';
 
   /* ============================================================
    * 工具函数
@@ -682,6 +682,80 @@
     if (excludedCount > 0 && onLog) onLog('已按“排除名单”跳过 ' + excludedCount + ' 条（可在本页最下方折叠区恢复）');
     const listings = [...byId.values()];
     return { listings, perVolumeCount };
+  }
+
+  /* ============================================================
+   * 简版单价排序模式（v1.7.0，针对 30+ 册大套 / 想快速看哪家最便宜）
+   * 不做精确凑单 DP（2^n 在 n>30 物理不可行），只解析当前搜索结果页，
+   * 把册数≥门槛的链接按「每册单价 = (售价 + 运费) ÷ 册数」从低到高排。
+   * 纯遍历 listings，O(条目数)，秒出；运费取该链接自带运费（包邮按 0）。
+   * 复用 searchKeyword（已含严格紧贴匹配/排除/品相过滤）+ extractVolumes（卷号解析）。
+   * ============================================================ */
+  // 把卷号集合压成紧凑范围串，如 {1,2,3,4,6,8} → "1-4,6,8"
+  function formatVolSet(vols) {
+    const arr = [...vols].sort((a, b) => a - b);
+    if (!arr.length) return '';
+    const parts = [];
+    let s = arr[0], e = arr[0];
+    for (let i = 1; i < arr.length; i++) {
+      if (arr[i] === e + 1) { e = arr[i]; }
+      else { parts.push(s === e ? String(s) : s + '-' + e); s = arr[i]; e = arr[i]; }
+    }
+    parts.push(s === e ? String(s) : s + '-' + e);
+    return parts.join(',');
+  }
+
+  // 抓取并按单价排序，返回行数组（已按单价升序）。onLog 用于进度提示。
+  async function computeUnitPrice(base, threshold, onLog) {
+    const items = await searchKeyword(base, onLog, CONFIG.pagesPerVolume);
+    const N = 60; // 泛排上限：覆盖到 60 册足够（>30 册精确 DP 不可行，这里只解析不 DP）
+    const rows = [];
+    for (const it of items) {
+      const vols = extractVolumes(it.title, base, N);
+      const vc = vols.size;
+      if (vc < threshold) continue;            // 只排册数够多的捆绑链接
+      const ship = it.free ? 0 : (Number(it.shipping) || 0);
+      const price = Number(it.price) || 0;
+      const total = price + ship;
+      const unit = total > 0 ? total / vc : 0;  // 单价(含运费)
+      rows.push({
+        title: it.title || '',
+        shopName: it.shopName || ('店铺' + (it.shopId || '')),
+        link: it.link || '',
+        price, ship, vc, unit,
+        volText: formatVolSet(vols),
+      });
+    }
+    // 主排序：单价升序；并列时册数多者优先（同样单价，一次买更全更省事）
+    rows.sort((a, b) => (a.unit - b.unit) || (b.vc - a.vc));
+    return rows;
+  }
+
+  // 把排序结果渲染进结果区（复用 #kfz-result 的表格样式）
+  function renderUnitPriceTable(rows, result) {
+    let html = '';
+    if (rows.length) {
+      const top = rows[0];
+      html += '<div class="total">📊 最便宜：每册 ' + yuan(top.unit) + '（' + top.vc + '册 · 共 ' +
+        yuan(top.price + top.ship) + '）</div>';
+    }
+    html += '<table><thead><tr><th>#</th><th>店铺</th><th>册数</th><th>范围</th><th>售价</th><th>运费</th><th>每册单价</th><th>链接</th></tr></thead><tbody>';
+    rows.forEach((r, i) => {
+      html += '<tr>' +
+        '<td>' + (i + 1) + '</td>' +
+        '<td class="shop"><span class="kfz-shop-name" data-shop="' + escapeAttr(r.shopName) +
+          '" title="点击→复制店名到剪贴板+直接填入筛选条「店铺」">' + escapeHtml(r.shopName) + '</span></td>' +
+        '<td>' + r.vc + '册</td>' +
+        '<td class="muted">' + escapeHtml(r.volText) + '</td>' +
+        '<td>' + yuan(r.price) + '</td>' +
+        '<td>' + (r.ship > 0 ? yuan(r.ship) : '包邮') + '</td>' +
+        '<td style="color:#c8161d;font-weight:700">' + yuan(r.unit) + '</td>' +
+        '<td>' + (r.link ? '<a href="' + escapeAttr(r.link) + '" target="_blank" style="color:#1a6fc4">打开</a>' : '—') + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    html += '<div class="kfz-tip">单价 = (售价 + 运费) ÷ 册数；运费取该链接自带运费（包邮按 0）。仅排序、不拼单；点店名＝复制＋填入筛选条「店铺」。</div>';
+    result.innerHTML = html;
   }
 
   /* ============================================================
@@ -1568,6 +1642,14 @@ function installShopNameClickInterceptor(logf) {
         <textarea id="kfz-exrules" class="kfz-exrules" placeholder="1-7大结局&#10;全套包邮">${escapeHtml(savedExRules)}</textarea>
         <div class="kfz-tip">标题里<b>原样连续包含</b>这些字符串的商品，一律不参与比价（用于批量排除“店主把标题写错”的商品）。换一套书会自动切换成那本书的规则。</div>
         <div class="row">
+          <div>
+            <label>单价排序门槛(册数≥)</label>
+            <input id="kfz-unit-th" value="10" />
+          </div>
+          <button id="kfz-unit">📊 单价排序(简版)</button>
+        </div>
+        <div class="kfz-tip">不凑全套：把册数≥门槛的链接按「每册单价(书价+运费)」从低到高排，秒出。适合 30+ 册大套，或只想看哪家最便宜。</div>
+        <div class="row">
           <button id="kfz-run">🚀 开始智能凑单</button>
           <button class="warn" id="kfz-stop" style="display:none">⏹ 终止计算</button>
           <button class="sec" id="kfz-demo">演示</button>
@@ -1806,6 +1888,30 @@ function installShopNameClickInterceptor(logf) {
         btn.disabled = false; btn.textContent = '🚀 开始智能凑单';
         stopBtn.classList.remove('stopping'); stopBtn.textContent = '⏹ 终止计算'; stopBtn.style.display = 'none';   // v1.3.2: 复位并隐藏终止按钮
       }
+    };
+
+    // v1.7.0: 简版「单价排序」模式——不凑全套，只把册数≥门槛的链接按每册单价(书价+运费)从低到高排，秒出。
+    //        适合 30+ 册大套，或只想看哪家最便宜。只排序展示，不自动拼单。
+    $('#kfz-unit', panel).onclick = async () => {
+      resetOut();
+      const base = setInput.value.trim();
+      if (!base) { logf('请先填写"整套书名/系列名"'); return; }
+      const threshold = Math.max(1, parseInt($('#kfz-unit-th', panel).value, 10) || 10);
+      STATE.base = base;
+      STATE.aborted = false;
+      const btn = $('#kfz-unit', panel); btn.disabled = true; btn.textContent = '排序中…';
+      try {
+        logf('🔍 抓取「' + base + '」并按每册单价排序（门槛≥' + threshold + '册）…');
+        const rows = await computeUnitPrice(base, threshold, logf);
+        if (!rows.length) {
+          logf('没有找到册数≥' + threshold + ' 的链接。');
+          result.innerHTML = '<div class="kfz-tip">没有找到册数≥' + threshold + ' 的链接。</div>';
+        } else {
+          logf('✅ 共 ' + rows.length + ' 条，已按每册单价从低到高排好。');
+          renderUnitPriceTable(rows, result);
+        }
+      } catch (e) { logf('出错：' + (e && e.message)); }
+      finally { btn.disabled = false; btn.textContent = '📊 单价排序(简版)'; }
     };
 
     // 若当前页面是商品/搜索页，尝试用标题预填书名（去掉网站名等无关片段）
